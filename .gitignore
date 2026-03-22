@@ -1,3 +1,6 @@
 .env
 Milingo.Backend/.env
+bin
+obj
+.vs
 
