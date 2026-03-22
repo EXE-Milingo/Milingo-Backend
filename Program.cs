@@ -4,10 +4,12 @@ using Google.Cloud.Firestore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.IdentityModel.Tokens;
 using Milingo.Backend.Services;
+using Microsoft.OpenApi.Models;
 
 LoadEnvironmentFile();
 
 var builder = WebApplication.CreateBuilder(args);
+
 
 // ══════════════════════════════════════════════════════════════════
 //  1. CONFIGURATION — Read secrets from appsettings / env vars
@@ -18,17 +20,23 @@ var firebaseProjectId = builder.Configuration["Firebase:ProjectId"]
 var firebaseKeyPath = builder.Configuration["Firebase:ServiceAccountKeyPath"]
     ?? "firebase-key.json";
 
+var resolvedFirebaseKeyPath = Path.IsPathRooted(firebaseKeyPath)
+    ? firebaseKeyPath
+    : Path.Combine(builder.Environment.ContentRootPath, firebaseKeyPath);
+
 // ══════════════════════════════════════════════════════════════════
 //  2. FIREBASE ADMIN SDK — Server-side verification & Firestore
 // ══════════════════════════════════════════════════════════════════
 FirebaseApp.Create(new AppOptions
 {
-    Credential = GoogleCredential.FromFile(firebaseKeyPath)
+    Credential = CredentialFactory
+        .FromFile<ServiceAccountCredential>(resolvedFirebaseKeyPath)
+        .ToGoogleCredential()
 });
 
 // Set the environment variable so the Google.Cloud.Firestore library
 // can locate the service account credentials automatically.
-Environment.SetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS", firebaseKeyPath);
+Environment.SetEnvironmentVariable("GOOGLE_APPLICATION_CREDENTIALS", resolvedFirebaseKeyPath);
 
 // ══════════════════════════════════════════════════════════════════
 //  3. AUTHENTICATION — Firebase JWT Bearer Token Validation
@@ -75,6 +83,36 @@ builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
 // ══════════════════════════════════════════════════════════════════
 builder.Services.AddControllers();
 builder.Services.AddOpenApi();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(options =>
+{
+    options.SwaggerDoc("v1", new OpenApiInfo
+    {
+        Title = "Milingo Backend API",
+        Version = "v1"
+    });
+
+    var bearerScheme = new OpenApiSecurityScheme
+    {
+        Name = "Authorization",
+        Description = "Enter: Bearer {your Firebase JWT}",
+        In = ParameterLocation.Header,
+        Type = SecuritySchemeType.Http,
+        Scheme = "bearer",
+        BearerFormat = "JWT",
+        Reference = new OpenApiReference
+        {
+            Type = ReferenceType.SecurityScheme,
+            Id = "Bearer"
+        }
+    };
+
+    options.AddSecurityDefinition("Bearer", bearerScheme);
+    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    {
+        [bearerScheme] = Array.Empty<string>()
+    });
+});
 
 builder.Services.AddCors(options =>
 {
@@ -95,9 +133,18 @@ var app = builder.Build();
 if (app.Environment.IsDevelopment())
 {
     app.MapOpenApi();
+    app.UseSwagger();
+    app.UseSwaggerUI(options =>
+    {
+        options.SwaggerEndpoint("/swagger/v1/swagger.json", "Milingo Backend API v1");
+        options.RoutePrefix = "swagger";
+    });
 }
 
-app.UseHttpsRedirection();
+if (!app.Environment.IsDevelopment())
+{
+    app.UseHttpsRedirection();
+}
 app.UseCors();
 
 // IMPORTANT: Authentication must come before Authorization
