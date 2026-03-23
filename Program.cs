@@ -82,7 +82,6 @@ builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
 //  5. API FRAMEWORK — Controllers, OpenAPI, CORS
 // ══════════════════════════════════════════════════════════════════
 builder.Services.AddControllers();
-builder.Services.AddOpenApi();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
@@ -132,7 +131,6 @@ var app = builder.Build();
 
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
     app.UseSwagger();
     app.UseSwaggerUI(options =>
     {
