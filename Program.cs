@@ -24,6 +24,12 @@ var resolvedFirebaseKeyPath = Path.IsPathRooted(firebaseKeyPath)
     ? firebaseKeyPath
     : Path.Combine(builder.Environment.ContentRootPath, firebaseKeyPath);
 
+if (!File.Exists(resolvedFirebaseKeyPath))
+{
+    throw new FileNotFoundException(
+        $"Firebase service account key file not found: {resolvedFirebaseKeyPath}");
+}
+
 // ══════════════════════════════════════════════════════════════════
 //  2. FIREBASE ADMIN SDK — Server-side verification & Firestore
 // ══════════════════════════════════════════════════════════════════
@@ -45,6 +51,9 @@ builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
+        // Keep Firebase claim names as-is (user_id, email, sub, ...)
+        options.MapInboundClaims = false;
+
         // Firebase issues tokens with this authority & issuer
         options.Authority = $"https://securetoken.google.com/{firebaseProjectId}";
         options.TokenValidationParameters = new TokenValidationParameters
@@ -53,7 +62,8 @@ builder.Services
             ValidIssuer = $"https://securetoken.google.com/{firebaseProjectId}",
             ValidateAudience = true,
             ValidAudience = firebaseProjectId,
-            ValidateLifetime = true
+            ValidateLifetime = true,
+            NameClaimType = "user_id"
         };
     });
 

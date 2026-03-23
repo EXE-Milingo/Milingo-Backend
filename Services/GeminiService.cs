@@ -22,7 +22,8 @@ public class GeminiService : IGeminiService
 
         _apiKey = configuration["Gemini:ApiKey"]
             ?? throw new InvalidOperationException("Gemini:ApiKey is not configured in appsettings.");
-        _model = configuration["Gemini:Model"] ?? "gemini-1.5-flash";
+        _model = configuration["Gemini:Model"]
+            ?? throw new InvalidOperationException("Gemini:Model is not configured. Set it in .env or appsettings.");
     }
 
     /// <inheritdoc />

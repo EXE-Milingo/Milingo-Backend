@@ -1,6 +1,6 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Milingo.Backend.Extensions;
 using Milingo.Backend.Models;
 using Milingo.Backend.Services;
 
@@ -44,7 +44,7 @@ public class SnapController : ControllerBase
         try
         {
             // ─── 1. SECURITY: Extract UID from verified Firebase JWT ───
-            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var userId = User.GetFirebaseUid();
             if (string.IsNullOrEmpty(userId))
             {
                 return Unauthorized(new ApiResponse<object>

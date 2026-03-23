@@ -1,6 +1,6 @@
-using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Milingo.Backend.Extensions;
 using Milingo.Backend.Models;
 using Milingo.Backend.Services;
 
@@ -34,7 +34,7 @@ public class UserController : ControllerBase
         try
         {
             // ─── 1. SECURITY: Extract UID from verified Firebase JWT ───
-            var uid = User.FindFirstValue(ClaimTypes.NameIdentifier);
+            var uid = User.GetFirebaseUid();
             if (string.IsNullOrEmpty(uid))
             {
                 return Unauthorized(new ApiResponse<object>
@@ -45,9 +45,7 @@ public class UserController : ControllerBase
             }
 
             // ─── 2. SECURITY: Extract email from JWT claims ───
-            var email = User.FindFirstValue(ClaimTypes.Email)
-                        ?? User.FindFirstValue("email")
-                        ?? string.Empty;
+            var email = User.GetFirebaseEmailOrEmpty();
 
             _logger.LogInformation(
                 "Initializing profile for user '{Uid}' ({Email}).", uid, email);
