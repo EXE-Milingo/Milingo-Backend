@@ -1,4 +1,5 @@
 using Google.Cloud.Firestore;
+using Grpc.Core;
 using Milingo.Backend.Models;
 
 namespace Milingo.Backend.Services;
@@ -90,5 +91,45 @@ public class FirestoreService : IFirestoreService
         }
 
         return isNewRequest;
+    }
+
+    /// <inheritdoc />
+    public async Task<bool> InitUserProfileAsync(
+        string uid,
+        string email,
+        string displayName,
+        string targetLanguage,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(uid);
+
+        // ─── CREATE PROFILE with initial data ───
+        var profileData = new Dictionary<string, object>
+        {
+            { "email", email },
+            { "display_name", displayName },
+            { "target_language", targetLanguage },
+            { "coins", 50 },               // Welcome bonus
+            { "current_streak", 0 },
+            { "created_at", FieldValue.ServerTimestamp }
+        };
+
+        try
+        {
+            // CreateAsync is atomic "create-if-not-exists".
+            // If another concurrent request already created this doc, Firestore returns AlreadyExists.
+            await userRef.CreateAsync(profileData, cancellationToken: cancellationToken);
+
+            _logger.LogInformation(
+                "Created profile for user '{Uid}' with 50 welcome coins.", uid);
+
+            return true;
+        }
+        catch (RpcException ex) when (ex.StatusCode == StatusCode.AlreadyExists)
+        {
+            _logger.LogInformation(
+                "Profile already exists for user '{Uid}'. Skipping creation.", uid);
+            return false;
+        }
     }
 }
