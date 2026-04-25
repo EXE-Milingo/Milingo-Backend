@@ -32,12 +32,39 @@ public class GeminiService : IGeminiService
         string mimeType,
         CancellationToken cancellationToken = default)
     {
-        // 1. Convert the uploaded file stream to Base64 for the Gemini API
+        // Convert the uploaded file stream to Base64 for the Gemini API
         using var memoryStream = new MemoryStream();
         await imageStream.CopyToAsync(memoryStream, cancellationToken);
         var base64Image = Convert.ToBase64String(memoryStream.ToArray());
 
-        // 2. Build the Gemini API request
+        return await CallGeminiAsync(base64Image, mimeType, prompt: BuildFullImagePrompt(), cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<VocabResponse> AnalyzeBase64ImageAsync(
+        string base64Image,
+        string mimeType,
+        string detectionLabel,
+        CancellationToken cancellationToken = default)
+    {
+        var prompt = BuildCroppedObjectPrompt(detectionLabel);
+        return await CallGeminiAsync(base64Image, mimeType, prompt, cancellationToken);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    //  PRIVATE HELPERS
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Shared method that sends a base64 image + text prompt to Gemini
+    /// and returns the parsed <see cref="VocabResponse"/>.
+    /// </summary>
+    private async Task<VocabResponse> CallGeminiAsync(
+        string base64Image,
+        string mimeType,
+        string prompt,
+        CancellationToken cancellationToken)
+    {
         var url = $"https://generativelanguage.googleapis.com/v1beta/models/{_model}:generateContent?key={_apiKey}";
 
         var requestBody = new
@@ -48,16 +75,7 @@ public class GeminiService : IGeminiService
                 {
                     parts = new object[]
                     {
-                        new
-                        {
-                            text = "Analyze this image and identify the main object. " +
-                                   "Return a JSON object with exactly these keys: " +
-                                   "'keyword' (the English word for the object), " +
-                                   "'translation' (Vietnamese meaning), " +
-                                   "'pronunciation' (IPA phonetic transcription), " +
-                                   "'example_sentence' (a simple bilingual example sentence). " +
-                                   "Return ONLY the raw JSON object, no markdown formatting."
-                        },
+                        new { text = prompt },
                         new
                         {
                             inline_data = new { mime_type = mimeType, data = base64Image }
@@ -76,8 +94,6 @@ public class GeminiService : IGeminiService
             Encoding.UTF8,
             "application/json");
 
-        // 3. Send request to Gemini — CancellationToken allows the server to abort
-        //    if the Flutter client disconnects mid-flight.
         _logger.LogInformation("Sending image analysis request to Gemini model '{Model}'...", _model);
 
         HttpResponseMessage response;
@@ -87,8 +103,7 @@ public class GeminiService : IGeminiService
         }
         catch (TaskCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            // Client disconnected — let it propagate as OperationCanceledException
-            _logger.LogInformation("Gemini request cancelled — client disconnected.");
+            _logger.LogInformation("Gemini request cancelled -- client disconnected.");
             throw;
         }
         catch (TaskCanceledException ex) when (ex.InnerException is TimeoutException)
@@ -99,7 +114,6 @@ public class GeminiService : IGeminiService
 
         var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
 
-        // 4. Check for HTTP-level errors
         if (!response.IsSuccessStatusCode)
         {
             _logger.LogError("Gemini API returned HTTP {StatusCode}: {Body}",
@@ -108,8 +122,37 @@ public class GeminiService : IGeminiService
                 $"Gemini API call failed with HTTP {(int)response.StatusCode}.");
         }
 
-        // 5. Parse the structured response
         return ParseGeminiResponse(responseBody);
+    }
+
+    /// <summary>
+    /// Prompt used when sending the full (uncropped) image to Gemini.
+    /// This is the original behaviour / fallback path.
+    /// </summary>
+    private static string BuildFullImagePrompt()
+    {
+        return "Analyze this image and identify the main object. " +
+               "Return a JSON object with exactly these keys: " +
+               "'keyword' (the English word for the object), " +
+               "'translation' (Vietnamese meaning), " +
+               "'pronunciation' (IPA phonetic transcription), " +
+               "'example_sentence' (a simple bilingual example sentence). " +
+               "Return ONLY the raw JSON object, no markdown formatting.";
+    }
+
+    /// <summary>
+    /// Prompt used when sending a cropped object image with a YOLO label hint.
+    /// The label helps Gemini focus on the correct object.
+    /// </summary>
+    private static string BuildCroppedObjectPrompt(string detectionLabel)
+    {
+        return $"This image shows a cropped object detected as '{detectionLabel}'. " +
+               "Analyze this object and return a JSON object with exactly these keys: " +
+               "'keyword' (the most accurate English word for this specific object), " +
+               "'translation' (Vietnamese meaning), " +
+               "'pronunciation' (IPA phonetic transcription), " +
+               "'example_sentence' (a simple bilingual example sentence using the keyword). " +
+               "Return ONLY the raw JSON object, no markdown formatting.";
     }
 
     /// <summary>

@@ -7,44 +7,143 @@ namespace Milingo.Backend.Services;
 /// </summary>
 public interface IFirestoreService
 {
-    /// <summary>
-    /// Saves a vocabulary flashcard to the user's sub-collection and awards 10 coins,
-    /// all within a single Firestore transaction with idempotency protection.
-    /// </summary>
-    /// <param name="userId">The Firebase UID of the user.</param>
-    /// <param name="vocab">The vocabulary data to save.</param>
-    /// <param name="idempotencyKey">
-    /// A unique key for this snap event. If the key has already been processed,
-    /// the method returns <c>false</c> without making any changes.
-    /// </param>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
-    /// <returns>
-    /// <c>true</c> if the vocabulary was saved (new request);
-    /// <c>false</c> if the idempotency key was already processed (duplicate request).
-    /// </returns>
+    // =================================================================
+    //  SNAP & LEARN
+    // =================================================================
+
+    Task<SnapAnalysisResponse?> GetCachedSnapResultAsync(
+        string userId,
+        string idempotencyKey,
+        CancellationToken cancellationToken = default);
+
     Task<bool> SaveVocabAndAddCoinsAsync(
         string userId,
         VocabResponse vocab,
         string idempotencyKey,
         CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Creates a user profile document at <c>users/{uid}</c> with initial data.
-    /// If the document already exists, it is NOT overwritten (idempotent).
-    /// </summary>
-    /// <param name="uid">The Firebase UID (used as the Firestore document ID).</param>
-    /// <param name="email">The user's email from the JWT.</param>
-    /// <param name="displayName">The display name chosen by the user.</param>
-    /// <param name="targetLanguage">The language the user wants to learn.</param>
-    /// <param name="cancellationToken">Token to cancel the operation.</param>
-    /// <returns>
-    /// <c>true</c> if a new profile was created;
-    /// <c>false</c> if the profile already existed and was left unchanged.
-    /// </returns>
+    Task<bool> SaveMultiVocabAndAddCoinsAsync(
+        string userId,
+        List<SnapVocabItem> vocabItems,
+        string idempotencyKey,
+        bool usedFallback,
+        List<SnapDetectionDetail> detectionDetails,
+        CancellationToken cancellationToken = default);
+
+    // =================================================================
+    //  USER PROFILE
+    // =================================================================
+
     Task<bool> InitUserProfileAsync(
         string uid,
         string email,
         string displayName,
         string targetLanguage,
+        CancellationToken cancellationToken = default);
+
+    // =================================================================
+    //  DECKS
+    // =================================================================
+
+    /// <summary>
+    /// Returns all flashcard decks for a user, ordered by created_at ascending.
+    /// </summary>
+    Task<List<DeckResponse>> GetDecksAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Creates a new flashcard deck. Sets is_default=false, vocab_count=0.
+    /// </summary>
+    /// <returns>The created deck with its generated ID.</returns>
+    Task<DeckResponse> CreateDeckAsync(
+        string userId,
+        CreateDeckRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Updates name, description, and/or emoji of an existing deck.
+    /// Does NOT allow changing is_default or vocab_count.
+    /// </summary>
+    /// <returns>The updated deck, or null if the deck was not found.</returns>
+    Task<DeckResponse?> UpdateDeckAsync(
+        string userId,
+        string deckId,
+        UpdateDeckRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a deck and all its cards.
+    /// Fails if the deck is a default deck (is_default=true).
+    /// </summary>
+    /// <returns>
+    /// A tuple: (success, errorReason).
+    /// success=true if deleted; false if not found or is default.
+    /// </returns>
+    Task<(bool Success, string? ErrorReason)> DeleteDeckAsync(
+        string userId,
+        string deckId,
+        CancellationToken cancellationToken = default);
+
+    // =================================================================
+    //  CARDS
+    // =================================================================
+
+    /// <summary>
+    /// Returns all cards in a deck, ordered by created_at descending.
+    /// Returns null if the deck does not exist.
+    /// </summary>
+    Task<List<CardResponse>?> GetCardsAsync(
+        string userId,
+        string deckId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Adds a card to a deck using a Firestore transaction:
+    ///   1. Check for duplicate (normalized_term + source_lang_code + target_lang_code)
+    ///   2. Create the card document
+    ///   3. Increment deck.vocab_count by 1
+    ///   4. Update deck.updated_at
+    /// </summary>
+    /// <returns>
+    /// A tuple: (card, conflictMessage).
+    /// card is non-null on success; conflictMessage is non-null on duplicate.
+    /// Both null means deck not found.
+    /// </returns>
+    Task<(CardResponse? Card, string? ConflictMessage, bool DeckNotFound)> AddCardAsync(
+        string userId,
+        string deckId,
+        AddCardRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Deletes a card using a Firestore transaction:
+    ///   1. Delete the card document
+    ///   2. Decrement deck.vocab_count by 1 (floor at 0)
+    ///   3. Update deck.updated_at
+    /// </summary>
+    /// <returns>
+    /// A tuple: (success, errorReason).
+    /// success=true if deleted; false if deck or card not found.
+    /// </returns>
+    Task<(bool Success, string? ErrorReason)> DeleteCardAsync(
+        string userId,
+        string deckId,
+        string cardId,
+        CancellationToken cancellationToken = default);
+
+    // =================================================================
+    //  FLASHCARD UTILITIES
+    // =================================================================
+
+    /// <summary>
+    /// Checks whether a normalized term (with lang codes) has been saved
+    /// in any of the user's decks.
+    /// </summary>
+    Task<SavedStatusResponse> GetSavedStatusAsync(
+        string userId,
+        string term,
+        string sourceLangCode,
+        string targetLangCode,
         CancellationToken cancellationToken = default);
 }

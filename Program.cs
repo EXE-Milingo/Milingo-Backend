@@ -88,6 +88,17 @@ builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
         new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 });
 
+// YoloService: Typed HttpClient for the YOLO object detection microservice
+builder.Services.AddHttpClient<IYoloService, YoloService>(client =>
+{
+    var baseUrl = builder.Configuration["Yolo:BaseUrl"]
+        ?? "http://localhost:8000";
+    var timeoutSeconds = builder.Configuration.GetValue<int>("Yolo:TimeoutSeconds", 15);
+
+    client.BaseAddress = new Uri(baseUrl);
+    client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+});
+
 // ══════════════════════════════════════════════════════════════════
 //  5. API FRAMEWORK — Controllers, OpenAPI, CORS
 // ══════════════════════════════════════════════════════════════════
