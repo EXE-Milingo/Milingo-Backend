@@ -119,7 +119,7 @@ public class GeminiService : IGeminiService
             _logger.LogError("Gemini API returned HTTP {StatusCode}: {Body}",
                 (int)response.StatusCode, responseBody);
             throw new HttpRequestException(
-                $"Gemini API call failed with HTTP {(int)response.StatusCode}.");
+                $"Gemini API call failed with HTTP {(int)response.StatusCode}. Response: {responseBody}");
         }
 
         return ParseGeminiResponse(responseBody);

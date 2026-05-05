@@ -74,9 +74,11 @@ builder.Services.AddAuthorization();
 // ══════════════════════════════════════════════════════════════════
 
 // Firestore: Singleton because FirestoreDb is thread-safe and reusable
-builder.Services.AddSingleton(_ => FirestoreDb.Create(firebaseProjectId));
-
-// FirestoreService: Scoped (one instance per HTTP request)
+builder.Services.AddSingleton(_ => new FirestoreDbBuilder
+{
+    ProjectId = firebaseProjectId,
+    DatabaseId = "milingo"
+}.Build());// FirestoreService: Scoped (one instance per HTTP request)
 builder.Services.AddScoped<IFirestoreService, FirestoreService>();
 
 // GeminiService: Typed HttpClient via IHttpClientFactory (prevents socket exhaustion)
