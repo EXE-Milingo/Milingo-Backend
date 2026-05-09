@@ -709,4 +709,140 @@ public class FirestoreService : IFirestoreService
                 : string.Empty
         };
     }
+
+    // =================================================================
+    //  GAMIFICATION
+    // =================================================================
+
+    /// <inheritdoc />
+    public async Task<UserStatsResponse> GetUserStatsAsync(
+        string userId,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(userId);
+        var snapshot = await userRef.GetSnapshotAsync(cancellationToken);
+
+        if (!snapshot.Exists)
+            return new UserStatsResponse();
+
+        var coins = snapshot.ContainsField("coins")
+            ? snapshot.GetValue<int>("coins") : 0;
+
+        var streak = snapshot.ContainsField("current_streak")
+            ? snapshot.GetValue<int>("current_streak") : 0;
+
+        // totalPoints = coins (có thể tách riêng sau)
+        var totalPoints = snapshot.ContainsField("total_points")
+            ? snapshot.GetValue<int>("total_points") : coins;
+
+        string? lastStudyDate = null;
+        if (snapshot.ContainsField("last_study_date"))
+        {
+            var ts = snapshot.GetValue<Timestamp>("last_study_date");
+            lastStudyDate = ts.ToDateTimeOffset().ToString("o");
+        }
+
+        return new UserStatsResponse
+        {
+            Coins = coins,
+            CurrentStreak = streak,
+            TotalPoints = totalPoints,
+            LastStudyDate = lastStudyDate,
+        };
+    }
+
+    /// <inheritdoc />
+    public async Task<UserStatsResponse> RecordFlashcardStudyAsync(
+        string userId,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(userId);
+
+        // Ngày hôm nay (UTC, chỉ lấy date part)
+        var todayUtc = DateTime.UtcNow.Date;
+
+        var updatedStats = await _db.RunTransactionAsync(async transaction =>
+        {
+            var snapshot = await transaction.GetSnapshotAsync(userRef, cancellationToken);
+
+            if (!snapshot.Exists)
+            {
+                _logger.LogWarning(
+                    "RecordFlashcardStudy: user '{UserId}' profile not found.", userId);
+                return new UserStatsResponse();
+            }
+
+            var coins = snapshot.ContainsField("coins")
+                ? snapshot.GetValue<int>("coins") : 0;
+            var totalPoints = snapshot.ContainsField("total_points")
+                ? snapshot.GetValue<int>("total_points") : coins;
+
+            // Lấy last_study_date
+            DateTime? lastStudyUtc = null;
+            if (snapshot.ContainsField("last_study_date"))
+            {
+                var ts = snapshot.GetValue<Timestamp>("last_study_date");
+                lastStudyUtc = ts.ToDateTimeOffset().UtcDateTime.Date;
+            }
+
+            // Idempotent: hôm nay đã ghi nhận rồi → không thay đổi gì
+            if (lastStudyUtc.HasValue && lastStudyUtc.Value == todayUtc)
+            {
+                _logger.LogInformation(
+                    "RecordFlashcardStudy: user '{UserId}' already studied today. No change.",
+                    userId);
+
+                var currentStreak = snapshot.ContainsField("current_streak")
+                    ? snapshot.GetValue<int>("current_streak") : 0;
+
+                return new UserStatsResponse
+                {
+                    Coins = coins,
+                    CurrentStreak = currentStreak,
+                    TotalPoints = totalPoints,
+                    LastStudyDate = todayUtc.ToString("o"),
+                };
+            }
+
+            // Tính streak mới
+            int newStreak;
+            var yesterdayUtc = todayUtc.AddDays(-1);
+
+            if (lastStudyUtc.HasValue && lastStudyUtc.Value == yesterdayUtc)
+            {
+                // Học liên tiếp → tăng streak
+                var oldStreak = snapshot.ContainsField("current_streak")
+                    ? snapshot.GetValue<int>("current_streak") : 0;
+                newStreak = oldStreak + 1;
+            }
+            else
+            {
+                // Bỏ ngày hoặc lần đầu học → reset về 1
+                newStreak = 1;
+            }
+
+            // Cập nhật Firestore
+            transaction.Update(userRef, new Dictionary<string, object>
+            {
+                { "current_streak", newStreak },
+                { "last_study_date", Timestamp.FromDateTime(
+                    DateTime.SpecifyKind(todayUtc, DateTimeKind.Utc)) },
+            });
+
+            _logger.LogInformation(
+                "RecordFlashcardStudy: user '{UserId}' streak → {Streak}.",
+                userId, newStreak);
+
+            return new UserStatsResponse
+            {
+                Coins = coins,
+                CurrentStreak = newStreak,
+                TotalPoints = totalPoints,
+                LastStudyDate = todayUtc.ToString("o"),
+            };
+
+        }, cancellationToken: cancellationToken);
+
+        return updatedStats;
+    }
 }

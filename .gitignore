@@ -6,3 +6,4 @@ obj
 *.user
 swagger-check.json
 firebase-key.json
+AGENT_CONTEXT.md

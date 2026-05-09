@@ -111,4 +111,85 @@ public class UserController : ControllerBase
             Data = SupportedLanguages.Details
         });
     }
+
+    /// <summary>
+    /// Trả về stats tổng hợp của user hiện tại: coins, streak, totalPoints.
+    /// </summary>
+    [HttpGet("stats")]
+    public async Task<IActionResult> GetStats(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uid = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(uid))
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token."
+                });
+
+            var stats = await _firestoreService.GetUserStatsAsync(uid, cancellationToken);
+
+            return Ok(new ApiResponse<UserStatsResponse>
+            {
+                Status = "success",
+                Message = "User stats retrieved successfully.",
+                Data = stats
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting stats for user.");
+            return StatusCode(500, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred."
+            });
+        }
+    }
+
+    /// <summary>
+    /// Ghi nhận user học flashcard hôm nay. Idempotent.
+    /// Tự động cập nhật streak theo logic: hôm qua học → +1, bỏ ngày → reset 1.
+    /// </summary>
+    [HttpPost("record-study")]
+    public async Task<IActionResult> RecordStudy(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uid = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(uid))
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token."
+                });
+
+            var stats = await _firestoreService.RecordFlashcardStudyAsync(uid, cancellationToken);
+
+            return Ok(new ApiResponse<UserStatsResponse>
+            {
+                Status = "success",
+                Message = "Study session recorded.",
+                Data = stats
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error recording study for user.");
+            return StatusCode(500, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred."
+            });
+        }
+    }
 }

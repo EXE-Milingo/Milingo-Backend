@@ -146,4 +146,27 @@ public interface IFirestoreService
         string sourceLangCode,
         string targetLangCode,
         CancellationToken cancellationToken = default);
+
+        // =================================================================
+    //  GAMIFICATION
+    // =================================================================
+
+    /// <summary>
+    /// Trả về stats của user: coins, streak, totalPoints.
+    /// Trả về UserStatsResponse với giá trị mặc định 0 nếu user chưa có profile.
+    /// </summary>
+    Task<UserStatsResponse> GetUserStatsAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Ghi nhận user học flashcard hôm nay.
+    /// - Nếu hôm nay đã ghi nhận rồi → không làm gì (idempotent).
+    /// - Nếu hôm qua có ghi nhận → tăng streak +1.
+    /// - Nếu bỏ ngày (quá hôm qua) → reset streak về 1.
+    /// Trả về UserStatsResponse sau khi cập nhật.
+    /// </summary>
+    Task<UserStatsResponse> RecordFlashcardStudyAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
 }
