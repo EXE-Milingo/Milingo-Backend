@@ -518,8 +518,7 @@ public class FirestoreService : IFirestoreService
 
             if (request.SourceVocabId is not null)
                 cardData["source_vocab_id"] = request.SourceVocabId;
-            else
-                cardData["source_vocab_id"] = FieldValue.Delete; // omit the field
+            // When SourceVocabId is null, simply omit the field from the document
 
             transaction.Set(newCardRef, cardData);
 
