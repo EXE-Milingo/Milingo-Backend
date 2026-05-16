@@ -211,18 +211,38 @@ public class FirestoreService : IFirestoreService
 
             if (detectionDetails.Count > 0)
             {
-                eventData["detections"] = detectionDetails.Select(d => new Dictionary<string, object>
+                eventData["detections"] = detectionDetails.Select(d =>
                 {
-                    { "label", d.Label },
-                    { "confidence", d.Confidence },
-                    { "boundingBox", new Dictionary<string, object>
-                        {
-                            { "x", d.X },
-                            { "y", d.Y },
-                            { "width", d.Width },
-                            { "height", d.Height }
+                    var detectionData = new Dictionary<string, object>
+                    {
+                        { "label", d.Label },
+                        { "confidence", d.Confidence },
+                        { "boundingBox", new Dictionary<string, object>
+                            {
+                                { "x", d.X },
+                                { "y", d.Y },
+                                { "width", d.Width },
+                                { "height", d.Height }
+                            }
                         }
+                    };
+
+                    if (d.Segmentation?.Points.Count > 0)
+                    {
+                        detectionData["segmentation"] = new Dictionary<string, object>
+                        {
+                            {
+                                "points",
+                                d.Segmentation.Points.Select(p => new Dictionary<string, object>
+                                {
+                                    { "x", p.X },
+                                    { "y", p.Y }
+                                }).ToList()
+                            }
+                        };
                     }
+
+                    return detectionData;
                 }).ToList();
             }
 

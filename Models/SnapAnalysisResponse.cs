@@ -33,6 +33,61 @@ public class SnapVocabItem
     [JsonPropertyName("detection_confidence")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public double? DetectionConfidence { get; set; }
+
+    /// <summary>
+    /// YOLO bounding box in original image pixels. Null when fallback was used.
+    /// </summary>
+    [JsonPropertyName("bounding_box")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SnapBoundingBox? BoundingBox { get; set; }
+
+    /// <summary>
+    /// YOLO segmentation contour in original image pixels. Null when the
+    /// segmenter did not return a usable mask.
+    /// </summary>
+    [JsonPropertyName("segmentation")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SnapSegmentation? Segmentation { get; set; }
+
+    /// <summary>
+    /// Base64-encoded JPEG of the cropped object detected by YOLO.
+    /// Null when fallback (full-image) was used.
+    /// Flutter uses this to display the object with a decorative border
+    /// and upload it to Firebase Cloud Storage.
+    /// </summary>
+    [JsonPropertyName("cropped_image_base64")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CroppedImageBase64 { get; set; }
+}
+
+public class SnapBoundingBox
+{
+    [JsonPropertyName("x")]
+    public int X { get; set; }
+
+    [JsonPropertyName("y")]
+    public int Y { get; set; }
+
+    [JsonPropertyName("width")]
+    public int Width { get; set; }
+
+    [JsonPropertyName("height")]
+    public int Height { get; set; }
+}
+
+public class SnapSegmentation
+{
+    [JsonPropertyName("points")]
+    public List<SnapSegmentationPoint> Points { get; set; } = new();
+}
+
+public class SnapSegmentationPoint
+{
+    [JsonPropertyName("x")]
+    public int X { get; set; }
+
+    [JsonPropertyName("y")]
+    public int Y { get; set; }
 }
 
 /// <summary>
@@ -47,6 +102,7 @@ public class SnapDetectionDetail
     public int Y { get; set; }
     public int Width { get; set; }
     public int Height { get; set; }
+    public SnapSegmentation? Segmentation { get; set; }
 }
 
 /// <summary>
