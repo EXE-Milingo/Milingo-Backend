@@ -18,6 +18,9 @@ public class DetectedObject
     [JsonPropertyName("boundingBox")]
     public BoundingBox BoundingBox { get; set; } = new();
 
+    [JsonPropertyName("segmentation")]
+    public YoloSegmentation? Segmentation { get; set; }
+
     /// <summary>
     /// JPEG image of the cropped region, encoded as base64.
     /// </summary>
@@ -41,4 +44,22 @@ public class BoundingBox
 
     [JsonPropertyName("height")]
     public int Height { get; set; }
+}
+
+/// <summary>
+/// Segmentation contour returned by YOLOv8-seg in original-image pixels.
+/// </summary>
+public class YoloSegmentation
+{
+    [JsonPropertyName("points")]
+    public List<YoloSegmentationPoint> Points { get; set; } = new();
+}
+
+public class YoloSegmentationPoint
+{
+    [JsonPropertyName("x")]
+    public int X { get; set; }
+
+    [JsonPropertyName("y")]
+    public int Y { get; set; }
 }

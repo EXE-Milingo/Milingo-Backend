@@ -43,7 +43,7 @@ public class YoloService : IYoloService
                 "Sending image '{FileName}' to YOLO service for detection...", fileName);
 
             var response = await _httpClient.PostAsync(
-                "/detect?confidence_threshold=0.5&max_objects=3",
+                "/detect?confidence_threshold=0.35&max_objects=3",
                 content,
                 cancellationToken);
 

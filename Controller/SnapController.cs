@@ -171,7 +171,8 @@ public class SnapController : ControllerBase
                     X = o.BoundingBox.X,
                     Y = o.BoundingBox.Y,
                     Width = o.BoundingBox.Width,
-                    Height = o.BoundingBox.Height
+                    Height = o.BoundingBox.Height,
+                    Segmentation = ToSnapSegmentation(o.Segmentation)
                 }).ToList();
 
                 // If Gemini failed for ALL objects, fall back to full image
@@ -313,7 +314,16 @@ public class SnapController : ControllerBase
                     Pronunciation = vocab.Pronunciation,
                     ExampleSentence = vocab.ExampleSentence,
                     DetectionLabel = det.Label,
-                    DetectionConfidence = det.Confidence
+                    DetectionConfidence = det.Confidence,
+                    BoundingBox = new SnapBoundingBox
+                    {
+                        X = det.BoundingBox.X,
+                        Y = det.BoundingBox.Y,
+                        Width = det.BoundingBox.Width,
+                        Height = det.BoundingBox.Height
+                    },
+                    Segmentation = ToSnapSegmentation(det.Segmentation),
+                    CroppedImageBase64 = det.CroppedImageBase64
                 };
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -331,6 +341,19 @@ public class SnapController : ControllerBase
 
         var results = await Task.WhenAll(tasks);
         return results.Where(r => r is not null).ToList()!;
+    }
+
+    private static SnapSegmentation? ToSnapSegmentation(YoloSegmentation? segmentation)
+    {
+        if (segmentation?.Points is not { Count: >= 3 })
+            return null;
+
+        return new SnapSegmentation
+        {
+            Points = segmentation.Points
+                .Select(p => new SnapSegmentationPoint { X = p.X, Y = p.Y })
+                .ToList()
+        };
     }
 
     /// <summary>
