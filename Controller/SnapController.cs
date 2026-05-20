@@ -30,6 +30,123 @@ public class SnapController : ControllerBase
     }
 
     /// <summary>
+    /// Accepts an image upload and returns YOLO segmentation/crop data only.
+    /// Gemini analysis is intentionally not called here; the client confirms
+    /// the detected object first, then calls /analyze-detected.
+    /// </summary>
+    [HttpPost("detect")]
+    [RequestSizeLimit(10 * 1024 * 1024)]
+    public async Task<IActionResult> DetectSnap(
+        IFormFile image,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var userId = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token: User identifier not found in claims."
+                });
+            }
+
+            if (image is null || image.Length == 0)
+            {
+                return BadRequest(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "An image file is required."
+                });
+            }
+
+            var allowedMimeTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "image/jpeg", "image/png", "image/webp"
+            };
+
+            if (!allowedMimeTypes.Contains(image.ContentType))
+            {
+                return BadRequest(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid file type. Allowed types: JPEG, PNG, WebP."
+                });
+            }
+
+            if (!IsValidImageSignature(image))
+            {
+                _logger.LogWarning(
+                    "User '{UserId}' uploaded a file with spoofed Content-Type '{ContentType}'.",
+                    userId, image.ContentType);
+
+                return BadRequest(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "The uploaded file is not a valid image. File signature mismatch."
+                });
+            }
+
+            byte[] imageBytes;
+            using (var ms = new MemoryStream())
+            {
+                await image.OpenReadStream().CopyToAsync(ms, cancellationToken);
+                imageBytes = ms.ToArray();
+            }
+
+            YoloDetectionResponse? yoloResult;
+            using (var yoloStream = new MemoryStream(imageBytes))
+            {
+                yoloResult = await _yoloService.DetectObjectsAsync(
+                    yoloStream, image.FileName ?? "image.jpg", image.ContentType, cancellationToken);
+            }
+
+            if (yoloResult is null || !yoloResult.Success || yoloResult.Objects.Count == 0)
+            {
+                return UnprocessableEntity(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Could not segment a clear object. Please try another photo."
+                });
+            }
+
+            var responseData = new SnapDetectionResponse
+            {
+                Objects = yoloResult.Objects.Select(ToSnapDetectedObject).ToList(),
+                TotalDetected = yoloResult.TotalDetected,
+                ReturnedCount = yoloResult.ReturnedCount,
+                ProcessingTimeMs = yoloResult.ProcessingTimeMs
+            };
+
+            _logger.LogInformation(
+                "User '{UserId}' detected {Count} object(s); waiting for client confirmation.",
+                userId, responseData.Objects.Count);
+
+            return Ok(new ApiResponse<SnapDetectionResponse>
+            {
+                Status = "success",
+                Message = $"Detected {responseData.Objects.Count} object(s).",
+                Data = responseData
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Detect request cancelled: client disconnected.");
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error during snap detection.");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred while detecting the object."
+            });
+        }
+    }
+
+    /// <summary>
     /// Accepts an image upload, detects main objects via YOLO, sends each
     /// cropped object to Gemini AI for vocabulary analysis, saves results
     /// to Firestore, and awards coins.
@@ -256,6 +373,130 @@ public class SnapController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Analyzes client-approved YOLO crops without running detection again.
+    /// </summary>
+    [HttpPost("analyze-detected")]
+    [RequestSizeLimit(10 * 1024 * 1024)]
+    public async Task<IActionResult> AnalyzeDetectedSnap(
+        [FromBody] AnalyzeDetectedSnapRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var userId = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token: User identifier not found in claims."
+                });
+            }
+
+            if (!Request.Headers.TryGetValue("Idempotency-Key", out var idempotencyKeyValues)
+                || string.IsNullOrWhiteSpace(idempotencyKeyValues.FirstOrDefault()))
+            {
+                return BadRequest(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "The 'Idempotency-Key' header is required. Send a unique UUID per snap request."
+                });
+            }
+            var idempotencyKey = idempotencyKeyValues.First()!.Trim();
+
+            var cachedResult = await _firestoreService.GetCachedSnapResultAsync(
+                userId, idempotencyKey, cancellationToken);
+
+            if (cachedResult is not null)
+            {
+                return Ok(new ApiResponse<SnapAnalysisResponse>
+                {
+                    Status = "success",
+                    Message = "This request was already processed. No duplicate coins awarded.",
+                    Data = cachedResult
+                });
+            }
+
+            var detections = request?.Objects
+                .Where(o => !string.IsNullOrWhiteSpace(o.CroppedImageBase64))
+                .Take(3)
+                .ToList() ?? new List<SnapDetectedObject>();
+
+            if (detections.Count == 0)
+            {
+                return BadRequest(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "At least one detected object crop is required."
+                });
+            }
+
+            var vocabItems = await AnalyzeDetectedObjectsAsync(detections, cancellationToken);
+            if (vocabItems.Count == 0)
+            {
+                return UnprocessableEntity(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "The AI could not identify the confirmed object. Please try another photo."
+                });
+            }
+
+            var detectionDetails = detections.Select(ToSnapDetectionDetail).ToList();
+            var isNew = await _firestoreService.SaveMultiVocabAndAddCoinsAsync(
+                userId, vocabItems, idempotencyKey, usedFallback: false,
+                detectionDetails, cancellationToken);
+
+            var coinsAwarded = isNew ? vocabItems.Count * 10 : 0;
+            var responseData = BuildResponse(idempotencyKey, vocabItems, usedFallback: false, coinsAwarded);
+
+            _logger.LogInformation(
+                "User '{UserId}' confirmed snap complete: {Count} object(s), new={IsNew}.",
+                userId, vocabItems.Count, isNew);
+
+            return Ok(new ApiResponse<SnapAnalysisResponse>
+            {
+                Status = "success",
+                Message = isNew
+                    ? $"Analyzed {vocabItems.Count} object(s). +{coinsAwarded} coins!"
+                    : "This request was already processed. No duplicate coins awarded.",
+                Data = responseData
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Analyze-detected request cancelled: client disconnected.");
+            return StatusCode(499);
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogError(ex, "Gemini API call failed.");
+            return StatusCode(StatusCodes.Status502BadGateway, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "The AI service is currently unavailable. Please try again later."
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "AI returned an invalid or incomplete response.");
+            return UnprocessableEntity(new ApiResponse<object>
+            {
+                Status = "error",
+                Message = ex.Message
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error during confirmed snap analysis.");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred. Please try again."
+            });
+        }
+    }
+
     // =================================================================
     //  PRIVATE HELPERS
     // =================================================================
@@ -354,6 +595,86 @@ public class SnapController : ControllerBase
                 .Select(p => new SnapSegmentationPoint { X = p.X, Y = p.Y })
                 .ToList()
         };
+    }
+
+    private static SnapDetectedObject ToSnapDetectedObject(DetectedObject detection)
+    {
+        return new SnapDetectedObject
+        {
+            Label = detection.Label,
+            Confidence = detection.Confidence,
+            BoundingBox = new SnapBoundingBox
+            {
+                X = detection.BoundingBox.X,
+                Y = detection.BoundingBox.Y,
+                Width = detection.BoundingBox.Width,
+                Height = detection.BoundingBox.Height
+            },
+            Segmentation = ToSnapSegmentation(detection.Segmentation),
+            CroppedImageBase64 = detection.CroppedImageBase64
+        };
+    }
+
+    private static SnapDetectionDetail ToSnapDetectionDetail(SnapDetectedObject detection)
+    {
+        return new SnapDetectionDetail
+        {
+            Label = detection.Label,
+            Confidence = detection.Confidence,
+            X = detection.BoundingBox.X,
+            Y = detection.BoundingBox.Y,
+            Width = detection.BoundingBox.Width,
+            Height = detection.BoundingBox.Height,
+            Segmentation = detection.Segmentation
+        };
+    }
+
+    /// <summary>
+    /// Sends client-approved cropped objects to Gemini in parallel.
+    /// </summary>
+    private async Task<List<SnapVocabItem>> AnalyzeDetectedObjectsAsync(
+        List<SnapDetectedObject> detections,
+        CancellationToken cancellationToken)
+    {
+        var tasks = detections.Select(async det =>
+        {
+            try
+            {
+                var label = string.IsNullOrWhiteSpace(det.Label) ? "object" : det.Label;
+                var vocab = await _geminiService.AnalyzeBase64ImageAsync(
+                    det.CroppedImageBase64,
+                    "image/jpeg",
+                    label,
+                    cancellationToken);
+
+                return new SnapVocabItem
+                {
+                    Keyword = vocab.Keyword,
+                    Translation = vocab.Translation,
+                    Pronunciation = vocab.Pronunciation,
+                    ExampleSentence = vocab.ExampleSentence,
+                    DetectionLabel = det.Label,
+                    DetectionConfidence = det.Confidence,
+                    BoundingBox = det.BoundingBox,
+                    Segmentation = det.Segmentation,
+                    CroppedImageBase64 = det.CroppedImageBase64
+                };
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Gemini analysis failed for confirmed object '{Label}' (confidence {Conf}). Skipping.",
+                    det.Label, det.Confidence);
+                return null;
+            }
+        });
+
+        var results = await Task.WhenAll(tasks);
+        return results.Where(r => r is not null).ToList()!;
     }
 
     /// <summary>

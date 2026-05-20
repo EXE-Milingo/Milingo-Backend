@@ -106,6 +106,56 @@ public class SnapDetectionDetail
 }
 
 /// <summary>
+/// Object returned by the detect-only snap endpoint before Gemini analysis.
+/// </summary>
+public class SnapDetectedObject
+{
+    [JsonPropertyName("label")]
+    public string Label { get; set; } = string.Empty;
+
+    [JsonPropertyName("confidence")]
+    public double Confidence { get; set; }
+
+    [JsonPropertyName("bounding_box")]
+    public SnapBoundingBox BoundingBox { get; set; } = new();
+
+    [JsonPropertyName("segmentation")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SnapSegmentation? Segmentation { get; set; }
+
+    [JsonPropertyName("cropped_image_base64")]
+    public string CroppedImageBase64 { get; set; } = string.Empty;
+}
+
+/// <summary>
+/// Response for /api/v1/snap/detect. Contains YOLO data only.
+/// </summary>
+public class SnapDetectionResponse
+{
+    [JsonPropertyName("objects")]
+    public List<SnapDetectedObject> Objects { get; set; } = new();
+
+    [JsonPropertyName("total_detected")]
+    public int TotalDetected { get; set; }
+
+    [JsonPropertyName("returned_count")]
+    public int ReturnedCount { get; set; }
+
+    [JsonPropertyName("processing_time_ms")]
+    public double ProcessingTimeMs { get; set; }
+}
+
+/// <summary>
+/// Request for /api/v1/snap/analyze-detected. Gemini receives only approved
+/// YOLO crops, so analysis does not re-run detection.
+/// </summary>
+public class AnalyzeDetectedSnapRequest
+{
+    [JsonPropertyName("objects")]
+    public List<SnapDetectedObject> Objects { get; set; } = new();
+}
+
+/// <summary>
 /// Top-level response for the /api/v1/snap/analyze endpoint.
 /// <para>
 /// <strong>Backward compatibility:</strong> When exactly one object is detected
