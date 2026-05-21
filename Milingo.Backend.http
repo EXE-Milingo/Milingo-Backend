@@ -6,7 +6,7 @@
 ###  SNAP & LEARN — Image Analysis (multi-object detection)
 ### ================================================================
 
-### Analyze an image (normal flow: YOLO + Gemini)
+### Analyze an image (normal flow: YOLO + OpenAI)
 # @name analyzeSnap
 POST {{host}}/api/v1/snap/analyze
 Authorization: {{token}}

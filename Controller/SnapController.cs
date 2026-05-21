@@ -12,18 +12,18 @@ namespace Milingo.Backend.Controllers;
 [Authorize]
 public class SnapController : ControllerBase
 {
-    private readonly IGeminiService _geminiService;
+    private readonly IOpenAiService _openAiService;
     private readonly IYoloService _yoloService;
     private readonly IFirestoreService _firestoreService;
     private readonly ILogger<SnapController> _logger;
 
     public SnapController(
-        IGeminiService geminiService,
+        IOpenAiService openAiService,
         IYoloService yoloService,
         IFirestoreService firestoreService,
         ILogger<SnapController> logger)
     {
-        _geminiService = geminiService;
+        _openAiService = openAiService;
         _yoloService = yoloService;
         _firestoreService = firestoreService;
         _logger = logger;
@@ -31,7 +31,7 @@ public class SnapController : ControllerBase
 
     /// <summary>
     /// Accepts an image upload and returns YOLO segmentation/crop data only.
-    /// Gemini analysis is intentionally not called here; the client confirms
+    /// OpenAI analysis is intentionally not called here; the client confirms
     /// the detected object first, then calls /analyze-detected.
     /// </summary>
     [HttpPost("detect")]
@@ -148,11 +148,11 @@ public class SnapController : ControllerBase
 
     /// <summary>
     /// Accepts an image upload, detects main objects via YOLO, sends each
-    /// cropped object to Gemini AI for vocabulary analysis, saves results
+    /// cropped object to OpenAI for vocabulary analysis, saves results
     /// to Firestore, and awards coins.
     ///
     /// If YOLO fails or finds no objects, falls back to sending the full
-    /// image to Gemini (original behaviour).
+    /// image to OpenAI.
     ///
     /// Idempotency: the Idempotency-Key is checked BEFORE any AI calls.
     /// Duplicate requests short-circuit and return the cached result.
@@ -189,7 +189,7 @@ public class SnapController : ControllerBase
             var idempotencyKey = idempotencyKeyValues.First()!.Trim();
 
             // --- 3. IDEMPOTENCY CHECK: Return cached result if duplicate ---
-            // This runs BEFORE any expensive YOLO / Gemini calls
+            // This runs BEFORE any expensive YOLO / OpenAI calls
             var cachedResult = await _firestoreService.GetCachedSnapResultAsync(
                 userId, idempotencyKey, cancellationToken);
 
@@ -246,7 +246,7 @@ public class SnapController : ControllerBase
                 });
             }
 
-            // --- 7. BUFFER IMAGE: Read once for YOLO + Gemini fallback ---
+            // --- 7. BUFFER IMAGE: Read once for YOLO + OpenAI fallback ---
             byte[] imageBytes;
             using (var ms = new MemoryStream())
             {
@@ -292,11 +292,11 @@ public class SnapController : ControllerBase
                     Segmentation = ToSnapSegmentation(o.Segmentation)
                 }).ToList();
 
-                // If Gemini failed for ALL objects, fall back to full image
+                // If OpenAI failed for ALL objects, fall back to full image
                 if (vocabItems.Count == 0)
                 {
                     _logger.LogWarning(
-                        "Gemini failed for all {Count} YOLO objects, falling back to full image.",
+                        "OpenAI failed for all {Count} YOLO objects, falling back to full image.",
                         yoloResult.Objects.Count);
 
                     usedFallback = true;
@@ -307,7 +307,7 @@ public class SnapController : ControllerBase
             }
             else
             {
-                // -- FALLBACK PATH: Send full image to Gemini --
+                // -- FALLBACK PATH: Send full image to OpenAI --
                 _logger.LogInformation("YOLO returned no valid objects, using full-image fallback.");
                 usedFallback = true;
                 vocabItems = await AnalyzeFullImageFallbackAsync(
@@ -346,7 +346,7 @@ public class SnapController : ControllerBase
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "Gemini API call failed.");
+            _logger.LogError(ex, "OpenAI API call failed.");
             return StatusCode(StatusCodes.Status502BadGateway, new ApiResponse<object>
             {
                 Status = "error",
@@ -470,7 +470,7 @@ public class SnapController : ControllerBase
         }
         catch (HttpRequestException ex)
         {
-            _logger.LogError(ex, "Gemini API call failed.");
+            _logger.LogError(ex, "OpenAI API call failed.");
             return StatusCode(StatusCodes.Status502BadGateway, new ApiResponse<object>
             {
                 Status = "error",
@@ -531,7 +531,7 @@ public class SnapController : ControllerBase
     }
 
     /// <summary>
-    /// Sends each YOLO-detected cropped object to Gemini in parallel.
+    /// Sends each YOLO-detected cropped object to OpenAI in parallel.
     /// Skips individual failures so partial results are still returned.
     /// </summary>
     private async Task<List<SnapVocabItem>> AnalyzeCroppedObjectsAsync(
@@ -542,7 +542,7 @@ public class SnapController : ControllerBase
         {
             try
             {
-                var vocab = await _geminiService.AnalyzeBase64ImageAsync(
+                var vocab = await _openAiService.AnalyzeBase64ImageAsync(
                     det.CroppedImageBase64,
                     "image/jpeg", // Crops are always JPEG from YOLO service
                     det.Label,
@@ -574,7 +574,7 @@ public class SnapController : ControllerBase
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
-                    "Gemini analysis failed for YOLO object '{Label}' (confidence {Conf}). Skipping.",
+                    "OpenAI analysis failed for YOLO object '{Label}' (confidence {Conf}). Skipping.",
                     det.Label, det.Confidence);
                 return null; // Skip this object
             }
@@ -630,7 +630,7 @@ public class SnapController : ControllerBase
     }
 
     /// <summary>
-    /// Sends client-approved cropped objects to Gemini in parallel.
+    /// Sends client-approved cropped objects to OpenAI in parallel.
     /// </summary>
     private async Task<List<SnapVocabItem>> AnalyzeDetectedObjectsAsync(
         List<SnapDetectedObject> detections,
@@ -641,7 +641,7 @@ public class SnapController : ControllerBase
             try
             {
                 var label = string.IsNullOrWhiteSpace(det.Label) ? "object" : det.Label;
-                var vocab = await _geminiService.AnalyzeBase64ImageAsync(
+                var vocab = await _openAiService.AnalyzeBase64ImageAsync(
                     det.CroppedImageBase64,
                     "image/jpeg",
                     label,
@@ -667,7 +667,7 @@ public class SnapController : ControllerBase
             catch (Exception ex)
             {
                 _logger.LogWarning(ex,
-                    "Gemini analysis failed for confirmed object '{Label}' (confidence {Conf}). Skipping.",
+                    "OpenAI analysis failed for confirmed object '{Label}' (confidence {Conf}). Skipping.",
                     det.Label, det.Confidence);
                 return null;
             }
@@ -678,7 +678,7 @@ public class SnapController : ControllerBase
     }
 
     /// <summary>
-    /// Fallback: sends the full original image to Gemini (original single-object behaviour).
+    /// Fallback: sends the full original image to OpenAI.
     /// </summary>
     private async Task<List<SnapVocabItem>> AnalyzeFullImageFallbackAsync(
         byte[] imageBytes,
@@ -686,7 +686,7 @@ public class SnapController : ControllerBase
         CancellationToken cancellationToken)
     {
         using var stream = new MemoryStream(imageBytes);
-        var vocab = await _geminiService.AnalyzeImageAsync(stream, mimeType, cancellationToken);
+        var vocab = await _openAiService.AnalyzeImageAsync(stream, mimeType, cancellationToken);
 
         return new List<SnapVocabItem>
         {

@@ -9,7 +9,7 @@ namespace Milingo.Backend.Services;
 ///
 /// If the YOLO service is unreachable, times out, or returns an error,
 /// this service returns <c>null</c> so the caller can fall back to
-/// sending the full image to Gemini.
+/// sending the full image to OpenAI.
 /// </summary>
 public class YoloService : IYoloService
 {
@@ -81,7 +81,7 @@ public class YoloService : IYoloService
         catch (Exception ex)
         {
             // Any other failure (timeout, DNS, network, deserialization) -> fallback
-            _logger.LogWarning(ex, "YOLO service call failed -- falling back to full-image Gemini.");
+            _logger.LogWarning(ex, "YOLO service call failed -- falling back to full-image OpenAI analysis.");
             return null;
         }
     }

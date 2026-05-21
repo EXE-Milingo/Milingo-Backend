@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace Milingo.Backend.Models;
 
 /// <summary>
-/// Represents the vocabulary data returned by the Gemini AI analysis.
+/// Represents the vocabulary data returned by the AI image analysis.
 /// Field names match the Firestore document schema (snake_case).
 /// </summary>
 public class VocabResponse

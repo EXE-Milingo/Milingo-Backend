@@ -106,7 +106,7 @@ public class SnapDetectionDetail
 }
 
 /// <summary>
-/// Object returned by the detect-only snap endpoint before Gemini analysis.
+/// Object returned by the detect-only snap endpoint before OpenAI analysis.
 /// </summary>
 public class SnapDetectedObject
 {
@@ -146,7 +146,7 @@ public class SnapDetectionResponse
 }
 
 /// <summary>
-/// Request for /api/v1/snap/analyze-detected. Gemini receives only approved
+/// Request for /api/v1/snap/analyze-detected. OpenAI receives only approved
 /// YOLO crops, so analysis does not re-run detection.
 /// </summary>
 public class AnalyzeDetectedSnapRequest

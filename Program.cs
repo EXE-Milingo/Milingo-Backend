@@ -81,10 +81,11 @@ builder.Services.AddSingleton(_ => new FirestoreDbBuilder
 }.Build());// FirestoreService: Scoped (one instance per HTTP request)
 builder.Services.AddScoped<IFirestoreService, FirestoreService>();
 
-// GeminiService: Typed HttpClient via IHttpClientFactory (prevents socket exhaustion)
-builder.Services.AddHttpClient<IGeminiService, GeminiService>(client =>
+// GeminiService disabled: requests now use OpenAiService.
+// builder.Services.AddHttpClient<IGeminiService, GeminiService>(...);
+builder.Services.AddHttpClient<IOpenAiService, OpenAiService>(client =>
 {
-    var timeoutSeconds = builder.Configuration.GetValue<int>("Gemini:TimeoutSeconds", 30);
+    var timeoutSeconds = builder.Configuration.GetValue<int>("OpenAI:TimeoutSeconds", 30);
     client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
     client.DefaultRequestHeaders.Accept.Add(
         new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
