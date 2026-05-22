@@ -1,0 +1,64 @@
+name: CI/CD Backend
+
+on:
+  push:
+    branches:
+      - main
+      - Flutter
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/exe-milingo/milingo-backend:latest
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Build backend image
+        run: docker build -t $IMAGE_NAME .
+
+      - name: Push backend image
+        run: docker push $IMAGE_NAME
+
+      - name: Deploy backend to XVPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          port: ${{ secrets.SERVER_PORT }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            cd /opt/milingo
+
+            cat > .env <<'EOF'
+            Firebase__ProjectId=${{ secrets.FIREBASE_PROJECT_ID }}
+            Firebase__ServiceAccountKeyPath=/app/secrets/firebase-key.json
+            Yolo__BaseUrl=http://yolo:8000
+            Yolo__TimeoutSeconds=60
+            OpenAI__ApiKey=${{ secrets.AI_API_KEY }}
+            OpenAI__Model=gpt-5.4-mini
+            OpenAI__TimeoutSeconds=30
+            EOF
+
+            mkdir -p secrets
+
+            cat > secrets/firebase-key.json <<'EOF'
+            ${{ secrets.FIREBASE_SERVICE_ACCOUNT_JSON }}
+            EOF
+
+            chmod 600 .env
+            chmod 600 secrets/firebase-key.json
+
+            docker compose pull backend
+            docker compose up -d backend
+            docker image prune -f
