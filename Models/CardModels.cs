@@ -39,6 +39,11 @@ public class AddCardRequest
 
     [JsonPropertyName("sourceVocabId")]
     public string? SourceVocabId { get; set; }
+
+    [Url(ErrorMessage = "Image URL must be a valid URL.")]
+    [StringLength(2048, ErrorMessage = "Image URL must be 2048 characters or fewer.")]
+    [JsonPropertyName("imageUrl")]
+    public string? ImageUrl { get; set; }
 }
 
 // =================================================================
@@ -73,6 +78,9 @@ public class CardResponse
 
     [JsonPropertyName("source_vocab_id")]
     public string? SourceVocabId { get; set; }
+
+    [JsonPropertyName("image_url")]
+    public string? ImageUrl { get; set; }
 
     [JsonPropertyName("created_at")]
     public string CreatedAt { get; set; } = string.Empty;

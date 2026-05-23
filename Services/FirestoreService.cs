@@ -540,6 +540,9 @@ public class FirestoreService : IFirestoreService
                 cardData["source_vocab_id"] = request.SourceVocabId;
             // When SourceVocabId is null, simply omit the field from the document
 
+            if (!string.IsNullOrWhiteSpace(request.ImageUrl))
+                cardData["image_url"] = request.ImageUrl.Trim();
+
             transaction.Set(newCardRef, cardData);
 
             // -- Increment vocab_count and update timestamp --
@@ -560,7 +563,10 @@ public class FirestoreService : IFirestoreService
                 PartOfSpeech = request.PartOfSpeech?.Trim() ?? string.Empty,
                 SourceLangCode = sourceLang,
                 TargetLangCode = targetLang,
-                SourceVocabId = request.SourceVocabId
+                SourceVocabId = request.SourceVocabId,
+                ImageUrl = string.IsNullOrWhiteSpace(request.ImageUrl)
+                    ? null
+                    : request.ImageUrl.Trim()
             };
 
             return (card, (string?)null, false);
@@ -720,6 +726,7 @@ public class FirestoreService : IFirestoreService
             SourceLangCode = doc.ContainsField("source_lang_code") ? doc.GetValue<string>("source_lang_code") : string.Empty,
             TargetLangCode = doc.ContainsField("target_lang_code") ? doc.GetValue<string>("target_lang_code") : string.Empty,
             SourceVocabId = doc.ContainsField("source_vocab_id") ? doc.GetValue<string?>("source_vocab_id") : null,
+            ImageUrl = doc.ContainsField("image_url") ? doc.GetValue<string?>("image_url") : null,
             CreatedAt = doc.ContainsField("created_at")
                 ? doc.GetValue<Timestamp>("created_at").ToDateTimeOffset().ToString("o")
                 : string.Empty,
