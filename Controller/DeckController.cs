@@ -134,6 +134,43 @@ public class DeckController : ControllerBase
     }
 
     /// <summary>
+    /// PATCH /api/v1/decks/{deckId}/favorite
+    /// Marks or unmarks a deck as favorite.
+    /// </summary>
+    [HttpPatch("{deckId}/favorite")]
+    public async Task<IActionResult> SetDeckFavorite(
+        string deckId,
+        [FromBody] FavoriteRequest request,
+        CancellationToken cancellationToken)
+    {
+        var userId = User.GetFirebaseUid();
+        if (string.IsNullOrEmpty(userId))
+            return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
+
+        try
+        {
+            var deck = await _firestoreService.SetDeckFavoriteAsync(
+                userId, deckId, request.IsFavorite, cancellationToken);
+
+            if (deck is null)
+                return NotFound(ErrorResponse($"Deck '{deckId}' not found."));
+
+            return Ok(new ApiResponse<DeckResponse>
+            {
+                Status = "success",
+                Message = "Deck favorite status updated successfully.",
+                Data = deck
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update favorite status for deck '{DeckId}' and user '{UserId}'.",
+                deckId, userId);
+            return StatusCode(500, ErrorResponse("An unexpected error occurred while updating the deck favorite status."));
+        }
+    }
+
+    /// <summary>
     /// DELETE /api/v1/decks/{deckId}
     /// Deletes a deck and all its cards. Cannot delete default decks.
     /// </summary>
@@ -257,6 +294,44 @@ public class DeckController : ControllerBase
         {
             _logger.LogError(ex, "Failed to add card to deck '{DeckId}' for user '{UserId}'.", deckId, userId);
             return StatusCode(500, ErrorResponse("An unexpected error occurred while adding the card."));
+        }
+    }
+
+    /// <summary>
+    /// PATCH /api/v1/decks/{deckId}/cards/{cardId}/favorite
+    /// Marks or unmarks a card as favorite.
+    /// </summary>
+    [HttpPatch("{deckId}/cards/{cardId}/favorite")]
+    public async Task<IActionResult> SetCardFavorite(
+        string deckId,
+        string cardId,
+        [FromBody] FavoriteRequest request,
+        CancellationToken cancellationToken)
+    {
+        var userId = User.GetFirebaseUid();
+        if (string.IsNullOrEmpty(userId))
+            return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
+
+        try
+        {
+            var card = await _firestoreService.SetCardFavoriteAsync(
+                userId, deckId, cardId, request.IsFavorite, cancellationToken);
+
+            if (card is null)
+                return NotFound(ErrorResponse($"Card '{cardId}' not found."));
+
+            return Ok(new ApiResponse<CardResponse>
+            {
+                Status = "success",
+                Message = "Card favorite status updated successfully.",
+                Data = card
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to update favorite status for card '{CardId}' in deck '{DeckId}' and user '{UserId}'.",
+                cardId, deckId, userId);
+            return StatusCode(500, ErrorResponse("An unexpected error occurred while updating the card favorite status."));
         }
     }
 

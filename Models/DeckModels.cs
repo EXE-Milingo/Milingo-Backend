@@ -38,6 +38,12 @@ public class UpdateDeckRequest
     public string? Emoji { get; set; }
 }
 
+public class FavoriteRequest
+{
+    [JsonPropertyName("isFavorite")]
+    public bool IsFavorite { get; set; }
+}
+
 // =================================================================
 //  RESPONSE DTO
 // =================================================================
@@ -58,6 +64,9 @@ public class DeckResponse
 
     [JsonPropertyName("is_default")]
     public bool IsDefault { get; set; }
+
+    [JsonPropertyName("is_favorite")]
+    public bool IsFavorite { get; set; }
 
     [JsonPropertyName("vocab_count")]
     public int VocabCount { get; set; }

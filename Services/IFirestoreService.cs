@@ -73,6 +73,16 @@ public interface IFirestoreService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Marks or unmarks a deck as a favorite for the current user.
+    /// </summary>
+    /// <returns>The updated deck, or null if the deck was not found.</returns>
+    Task<DeckResponse?> SetDeckFavoriteAsync(
+        string userId,
+        string deckId,
+        bool isFavorite,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Deletes a deck and all its cards.
     /// Fails if the deck is a default deck (is_default=true).
     /// </summary>
@@ -114,6 +124,17 @@ public interface IFirestoreService
         string userId,
         string deckId,
         AddCardRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Marks or unmarks a card as a favorite for the current user.
+    /// </summary>
+    /// <returns>The updated card, or null if the deck or card was not found.</returns>
+    Task<CardResponse?> SetCardFavoriteAsync(
+        string userId,
+        string deckId,
+        string cardId,
+        bool isFavorite,
         CancellationToken cancellationToken = default);
 
     /// <summary>

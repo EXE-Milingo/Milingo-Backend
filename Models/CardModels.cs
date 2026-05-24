@@ -82,6 +82,9 @@ public class CardResponse
     [JsonPropertyName("image_url")]
     public string? ImageUrl { get; set; }
 
+    [JsonPropertyName("is_favorite")]
+    public bool IsFavorite { get; set; }
+
     [JsonPropertyName("created_at")]
     public string CreatedAt { get; set; } = string.Empty;
 

@@ -263,12 +263,16 @@ Base route: `/api/v1/decks`
 - `POST /api/v1/decks`
   - Creates a new flashcard deck.
   - Request: `CreateDeckRequest`.
-  - Sets `is_default=false` and `vocab_count=0`.
+  - Sets `is_default=false`, `is_favorite=false`, and `vocab_count=0`.
 
 - `PATCH /api/v1/decks/{deckId}`
   - Updates deck name, description, and/or emoji.
   - Does not allow updating `is_default` or `vocab_count`.
   - Requires at least one editable field.
+
+- `PATCH /api/v1/decks/{deckId}/favorite`
+  - Body: `{ "isFavorite": true|false }`.
+  - Marks or unmarks a deck as favorite for the current user.
 
 - `DELETE /api/v1/decks/{deckId}`
   - Deletes a non-default deck and all cards in its `cards` subcollection.
@@ -285,6 +289,10 @@ Base route: `/api/v1/decks`
     - `target_lang_code`
   - Creates the card, increments `deck.vocab_count`, and updates deck timestamp.
   - Returns `409 Conflict` on duplicate.
+
+- `PATCH /api/v1/decks/{deckId}/cards/{cardId}/favorite`
+  - Body: `{ "isFavorite": true|false }`.
+  - Marks or unmarks a card as favorite for the current user.
 
 - `DELETE /api/v1/decks/{deckId}/cards/{cardId}`
   - Deletes a card in a transaction.
@@ -312,6 +320,7 @@ Single service that owns Firestore access for:
 - User profile creation
 - Deck CRUD
 - Card CRUD
+- Deck/card favorite status updates
 - Saved-status lookup
 - Gamification stats and streak updates
 
@@ -453,12 +462,16 @@ Typed `HttpClient` service for a YOLO FastAPI object detection microservice.
   - optional `description`
   - optional `emoji`
 
+- `FavoriteRequest`
+  - `isFavorite`
+
 - `DeckResponse`
   - `id`
   - `name`
   - `description`
   - `emoji`
   - `is_default`
+  - `is_favorite`
   - `vocab_count`
   - `created_at`
   - `updated_at`
@@ -482,6 +495,8 @@ Typed `HttpClient` service for a YOLO FastAPI object detection microservice.
   - `source_lang_code`
   - `target_lang_code`
   - optional `source_vocab_id`
+  - optional `image_url`
+  - `is_favorite`
   - `created_at`
   - `updated_at`
 
@@ -584,6 +599,7 @@ name
 description
 emoji
 is_default
+is_favorite
 vocab_count
 created_at
 updated_at
@@ -606,12 +622,27 @@ part_of_speech
 source_lang_code
 target_lang_code
 source_vocab_id
+image_url
+is_favorite
 created_at
 updated_at
 ```
 
 Duplicate detection uses `normalized_term`, `source_lang_code`, and
 `target_lang_code`.
+
+Fast duplicate/status indexes:
+
+```text
+users/{userId}/flashcard_decks/{deckId}/card_keys/{hash}
+users/{userId}/flashcard_card_index/{hash}
+```
+
+`hash` is SHA-256 of `normalized_term|source_lang_code|target_lang_code`.
+`card_keys` gives per-deck duplicate checks a point-read path.
+`flashcard_card_index` stores `deck_ids` so saved-status avoids scanning every
+deck. Legacy cards without these index docs still work through fallback queries
+and are backfilled lazily when duplicate/status checks touch them.
 
 ## Existing API Scratch File
 
@@ -647,6 +678,7 @@ Implemented backend capabilities observed in this snapshot:
 - Coin awards for snap analysis.
 - Deck create/read/update/delete.
 - Card create/read/delete.
+- Deck/card favorite status update.
 - Duplicate card prevention.
 - Saved-card status lookup across all decks.
 - User stats endpoint.

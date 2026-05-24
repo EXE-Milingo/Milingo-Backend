@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Google.Cloud.Firestore;
 using Grpc.Core;
@@ -360,6 +362,7 @@ public class FirestoreService : IFirestoreService
             { "description", request.Description?.Trim() ?? string.Empty },
             { "emoji", request.Emoji?.Trim() ?? string.Empty },
             { "is_default", false },
+            { "is_favorite", false },
             { "vocab_count", 0 },
             { "created_at", FieldValue.ServerTimestamp },
             { "updated_at", FieldValue.ServerTimestamp }
@@ -413,6 +416,34 @@ public class FirestoreService : IFirestoreService
     }
 
     /// <inheritdoc />
+    public async Task<DeckResponse?> SetDeckFavoriteAsync(
+        string userId,
+        string deckId,
+        bool isFavorite,
+        CancellationToken cancellationToken = default)
+    {
+        var deckRef = _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks").Document(deckId);
+
+        var snapshot = await deckRef.GetSnapshotAsync(cancellationToken);
+        if (!snapshot.Exists)
+            return null;
+
+        await deckRef.UpdateAsync(new Dictionary<string, object>
+        {
+            { "is_favorite", isFavorite },
+            { "updated_at", FieldValue.ServerTimestamp }
+        }, cancellationToken: cancellationToken);
+
+        _logger.LogInformation(
+            "Set favorite={IsFavorite} for deck '{DeckId}' and user '{UserId}'.",
+            isFavorite, deckId, userId);
+
+        snapshot = await deckRef.GetSnapshotAsync(cancellationToken);
+        return MapToDeckResponse(snapshot);
+    }
+
+    /// <inheritdoc />
     public async Task<(bool Success, string? ErrorReason)> DeleteDeckAsync(
         string userId,
         string deckId,
@@ -434,12 +465,38 @@ public class FirestoreService : IFirestoreService
         // Delete all cards in the subcollection first
         var cardsRef = deckRef.Collection("cards");
         var cardSnapshots = await cardsRef.GetSnapshotAsync(cancellationToken);
+        var cardKeySnapshots = await deckRef.Collection("card_keys")
+            .GetSnapshotAsync(cancellationToken);
 
         // Firestore batch delete (max 500 per batch, sufficient for flashcards)
         var batch = _db.StartBatch();
         foreach (var cardDoc in cardSnapshots.Documents)
         {
+            if (cardDoc.ContainsField("normalized_term") &&
+                cardDoc.ContainsField("source_lang_code") &&
+                cardDoc.ContainsField("target_lang_code"))
+            {
+                var cardIndexKey = BuildCardIndexKey(
+                    cardDoc.GetValue<string>("normalized_term"),
+                    cardDoc.GetValue<string>("source_lang_code"),
+                    cardDoc.GetValue<string>("target_lang_code"));
+
+                batch.Set(
+                    _db.Collection("users").Document(userId)
+                        .Collection("flashcard_card_index").Document(cardIndexKey),
+                    new Dictionary<string, object>
+                    {
+                        { "deck_ids", FieldValue.ArrayRemove(deckId) },
+                        { "updated_at", FieldValue.ServerTimestamp }
+                    },
+                    SetOptions.MergeAll);
+            }
+
             batch.Delete(cardDoc.Reference);
+        }
+        foreach (var cardKeyDoc in cardKeySnapshots.Documents)
+        {
+            batch.Delete(cardKeyDoc.Reference);
         }
         batch.Delete(deckRef);
         await batch.CommitAsync(cancellationToken);
@@ -488,6 +545,10 @@ public class FirestoreService : IFirestoreService
         var normalizedTerm = request.Term.Trim().ToLowerInvariant();
         var sourceLang = request.SourceLangCode.Trim().ToLowerInvariant();
         var targetLang = request.TargetLangCode.Trim().ToLowerInvariant();
+        var cardIndexKey = BuildCardIndexKey(normalizedTerm, sourceLang, targetLang);
+        var deckCardKeyRef = deckRef.Collection("card_keys").Document(cardIndexKey);
+        var userCardIndexRef = _db.Collection("users").Document(userId)
+            .Collection("flashcard_card_index").Document(cardIndexKey);
 
         // Use a transaction to ensure atomicity:
         //  1. Verify deck exists
@@ -502,6 +563,17 @@ public class FirestoreService : IFirestoreService
 
             // -- Check for duplicate --
             // Firestore transactions require all reads before writes.
+            var deckCardKeySnapshot = await transaction.GetSnapshotAsync(deckCardKeyRef, cancellationToken);
+            if (deckCardKeySnapshot.Exists)
+            {
+                var existingTerm = deckCardKeySnapshot.ContainsField("term")
+                    ? deckCardKeySnapshot.GetValue<string>("term")
+                    : normalizedTerm;
+
+                return (null, $"Card '{existingTerm}' already exists in this deck.", false);
+            }
+
+            // Legacy fallback for cards created before card_keys existed.
             // Query cards with matching normalized_term + source + target lang.
             var cardsRef = deckRef.Collection("cards");
             var duplicateQuery = cardsRef
@@ -518,6 +590,27 @@ public class FirestoreService : IFirestoreService
                     ? existing.GetValue<string>("term")
                     : normalizedTerm;
 
+                transaction.Set(deckCardKeyRef, new Dictionary<string, object>
+                {
+                    { "card_id", existing.Id },
+                    { "term", existingTerm },
+                    { "normalized_term", normalizedTerm },
+                    { "source_lang_code", sourceLang },
+                    { "target_lang_code", targetLang },
+                    { "user_id", userId },
+                    { "deck_id", deckId },
+                    { "updated_at", FieldValue.ServerTimestamp }
+                }, SetOptions.MergeAll);
+
+                transaction.Set(userCardIndexRef, new Dictionary<string, object>
+                {
+                    { "normalized_term", normalizedTerm },
+                    { "source_lang_code", sourceLang },
+                    { "target_lang_code", targetLang },
+                    { "deck_ids", FieldValue.ArrayUnion(deckId) },
+                    { "updated_at", FieldValue.ServerTimestamp }
+                }, SetOptions.MergeAll);
+
                 return (null, $"Card '{existingTerm}' already exists in this deck.", false);
             }
 
@@ -532,6 +625,7 @@ public class FirestoreService : IFirestoreService
                 { "part_of_speech", request.PartOfSpeech?.Trim() ?? string.Empty },
                 { "source_lang_code", sourceLang },
                 { "target_lang_code", targetLang },
+                { "is_favorite", false },
                 { "created_at", FieldValue.ServerTimestamp },
                 { "updated_at", FieldValue.ServerTimestamp }
             };
@@ -544,6 +638,27 @@ public class FirestoreService : IFirestoreService
                 cardData["image_url"] = request.ImageUrl.Trim();
 
             transaction.Set(newCardRef, cardData);
+            transaction.Set(deckCardKeyRef, new Dictionary<string, object>
+            {
+                { "card_id", newCardRef.Id },
+                { "term", request.Term.Trim() },
+                { "normalized_term", normalizedTerm },
+                { "source_lang_code", sourceLang },
+                { "target_lang_code", targetLang },
+                { "user_id", userId },
+                { "deck_id", deckId },
+                { "created_at", FieldValue.ServerTimestamp },
+                { "updated_at", FieldValue.ServerTimestamp }
+            });
+
+            transaction.Set(userCardIndexRef, new Dictionary<string, object>
+            {
+                { "normalized_term", normalizedTerm },
+                { "source_lang_code", sourceLang },
+                { "target_lang_code", targetLang },
+                { "deck_ids", FieldValue.ArrayUnion(deckId) },
+                { "updated_at", FieldValue.ServerTimestamp }
+            }, SetOptions.MergeAll);
 
             // -- Increment vocab_count and update timestamp --
             transaction.Update(deckRef, new Dictionary<string, object>
@@ -564,6 +679,7 @@ public class FirestoreService : IFirestoreService
                 SourceLangCode = sourceLang,
                 TargetLangCode = targetLang,
                 SourceVocabId = request.SourceVocabId,
+                IsFavorite = false,
                 ImageUrl = string.IsNullOrWhiteSpace(request.ImageUrl)
                     ? null
                     : request.ImageUrl.Trim()
@@ -581,16 +697,50 @@ public class FirestoreService : IFirestoreService
                 "Added card '{Term}' to deck '{DeckId}' for user '{UserId}'.",
                 request.Term, deckId, userId);
 
-            // Re-read to get server timestamps
-            var cardSnapshot = await deckRef.Collection("cards")
-                .Document(card.Id)
-                .GetSnapshotAsync(cancellationToken);
-
-            if (cardSnapshot.Exists)
-                return (MapToCardResponse(cardSnapshot), null, false);
+            return (card, null, false);
         }
 
         return (card, conflictMessage, deckNotFound);
+    }
+
+    /// <inheritdoc />
+    public async Task<CardResponse?> SetCardFavoriteAsync(
+        string userId,
+        string deckId,
+        string cardId,
+        bool isFavorite,
+        CancellationToken cancellationToken = default)
+    {
+        var deckRef = _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks").Document(deckId);
+        var cardRef = deckRef.Collection("cards").Document(cardId);
+
+        var deckSnapshot = await deckRef.GetSnapshotAsync(cancellationToken);
+        if (!deckSnapshot.Exists)
+            return null;
+
+        var cardSnapshot = await cardRef.GetSnapshotAsync(cancellationToken);
+        if (!cardSnapshot.Exists)
+            return null;
+
+        var batch = _db.StartBatch();
+        batch.Update(cardRef, new Dictionary<string, object>
+        {
+            { "is_favorite", isFavorite },
+            { "updated_at", FieldValue.ServerTimestamp }
+        });
+        batch.Update(deckRef, new Dictionary<string, object>
+        {
+            { "updated_at", FieldValue.ServerTimestamp }
+        });
+        await batch.CommitAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "Set favorite={IsFavorite} for card '{CardId}' in deck '{DeckId}' and user '{UserId}'.",
+            isFavorite, cardId, deckId, userId);
+
+        cardSnapshot = await cardRef.GetSnapshotAsync(cancellationToken);
+        return MapToCardResponse(cardSnapshot);
     }
 
     /// <inheritdoc />
@@ -614,8 +764,34 @@ public class FirestoreService : IFirestoreService
             if (!cardSnapshot.Exists)
                 return (false, (string?)"Card not found.");
 
+            var normalizedTerm = cardSnapshot.ContainsField("normalized_term")
+                ? cardSnapshot.GetValue<string>("normalized_term")
+                : string.Empty;
+            var sourceLang = cardSnapshot.ContainsField("source_lang_code")
+                ? cardSnapshot.GetValue<string>("source_lang_code")
+                : string.Empty;
+            var targetLang = cardSnapshot.ContainsField("target_lang_code")
+                ? cardSnapshot.GetValue<string>("target_lang_code")
+                : string.Empty;
+
             // Delete the card
             transaction.Delete(cardRef);
+            if (!string.IsNullOrWhiteSpace(normalizedTerm) &&
+                !string.IsNullOrWhiteSpace(sourceLang) &&
+                !string.IsNullOrWhiteSpace(targetLang))
+            {
+                var cardIndexKey = BuildCardIndexKey(normalizedTerm, sourceLang, targetLang);
+                transaction.Delete(deckRef.Collection("card_keys").Document(cardIndexKey));
+                transaction.Set(
+                    _db.Collection("users").Document(userId)
+                        .Collection("flashcard_card_index").Document(cardIndexKey),
+                    new Dictionary<string, object>
+                    {
+                        { "deck_ids", FieldValue.ArrayRemove(deckId) },
+                        { "updated_at", FieldValue.ServerTimestamp }
+                    },
+                    SetOptions.MergeAll);
+            }
 
             // Decrement vocab_count (floor at 0)
             var currentCount = deckSnapshot.ContainsField("vocab_count")
@@ -663,6 +839,24 @@ public class FirestoreService : IFirestoreService
         var decksRef = _db.Collection("users").Document(userId)
             .Collection("flashcard_decks");
 
+        var cardIndexKey = BuildCardIndexKey(normalizedTerm, sourceLang, targetLang);
+        var indexSnapshot = await _db.Collection("users").Document(userId)
+            .Collection("flashcard_card_index").Document(cardIndexKey)
+            .GetSnapshotAsync(cancellationToken);
+        if (indexSnapshot.Exists && indexSnapshot.ContainsField("deck_ids"))
+        {
+            var deckIds = indexSnapshot.GetValue<List<string>>("deck_ids")
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct()
+                .ToList();
+
+            return new SavedStatusResponse
+            {
+                IsSaved = deckIds.Count > 0,
+                DeckIds = deckIds
+            };
+        }
+
         var allDecks = await decksRef.GetSnapshotAsync(cancellationToken);
         var matchedDeckIds = new List<string>();
 
@@ -683,6 +877,20 @@ public class FirestoreService : IFirestoreService
             }
         }
 
+        if (matchedDeckIds.Count > 0)
+        {
+            await _db.Collection("users").Document(userId)
+                .Collection("flashcard_card_index").Document(cardIndexKey)
+                .SetAsync(new Dictionary<string, object>
+                {
+                    { "normalized_term", normalizedTerm },
+                    { "source_lang_code", sourceLang },
+                    { "target_lang_code", targetLang },
+                    { "deck_ids", matchedDeckIds.Distinct().ToList() },
+                    { "updated_at", FieldValue.ServerTimestamp }
+                }, SetOptions.MergeAll, cancellationToken);
+        }
+
         return new SavedStatusResponse
         {
             IsSaved = matchedDeckIds.Count > 0,
@@ -694,6 +902,21 @@ public class FirestoreService : IFirestoreService
     //  PRIVATE HELPERS
     // =================================================================
 
+    private static string BuildCardIndexKey(
+        string normalizedTerm,
+        string sourceLang,
+        string targetLang)
+    {
+        var raw = string.Join(
+            "|",
+            normalizedTerm.Trim().ToLowerInvariant(),
+            sourceLang.Trim().ToLowerInvariant(),
+            targetLang.Trim().ToLowerInvariant());
+
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(raw)))
+            .ToLowerInvariant();
+    }
+
     private static DeckResponse MapToDeckResponse(DocumentSnapshot doc)
     {
         return new DeckResponse
@@ -703,6 +926,7 @@ public class FirestoreService : IFirestoreService
             Description = doc.ContainsField("description") ? doc.GetValue<string>("description") : string.Empty,
             Emoji = doc.ContainsField("emoji") ? doc.GetValue<string>("emoji") : string.Empty,
             IsDefault = doc.ContainsField("is_default") && doc.GetValue<bool>("is_default"),
+            IsFavorite = doc.ContainsField("is_favorite") && doc.GetValue<bool>("is_favorite"),
             VocabCount = doc.ContainsField("vocab_count") ? doc.GetValue<int>("vocab_count") : 0,
             CreatedAt = doc.ContainsField("created_at")
                 ? doc.GetValue<Timestamp>("created_at").ToDateTimeOffset().ToString("o")
@@ -727,6 +951,7 @@ public class FirestoreService : IFirestoreService
             TargetLangCode = doc.ContainsField("target_lang_code") ? doc.GetValue<string>("target_lang_code") : string.Empty,
             SourceVocabId = doc.ContainsField("source_vocab_id") ? doc.GetValue<string?>("source_vocab_id") : null,
             ImageUrl = doc.ContainsField("image_url") ? doc.GetValue<string?>("image_url") : null,
+            IsFavorite = doc.ContainsField("is_favorite") && doc.GetValue<bool>("is_favorite"),
             CreatedAt = doc.ContainsField("created_at")
                 ? doc.GetValue<Timestamp>("created_at").ToDateTimeOffset().ToString("o")
                 : string.Empty,
