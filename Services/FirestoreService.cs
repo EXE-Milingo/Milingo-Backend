@@ -605,7 +605,9 @@ public class FirestoreService : IFirestoreService
         var query = cardsRef.OrderByDescending("created_at");
         var snapshots = await query.GetSnapshotAsync(cancellationToken);
 
-        return snapshots.Documents.Select(MapToCardResponse).ToList();
+        return snapshots.Documents
+            .Select(doc => MapToCardResponse(doc, deckId))
+            .ToList();
     }
 
     /// <inheritdoc />
@@ -702,6 +704,10 @@ public class FirestoreService : IFirestoreService
                 { "source_lang_code", sourceLang },
                 { "target_lang_code", targetLang },
                 { "is_favorite", false },
+                { "srs_state", "new" },
+                { "srs_repetitions", 0 },
+                { "srs_easiness_factor", 2.5 },
+                { "srs_interval", 0 },
                 { "created_at", FieldValue.ServerTimestamp },
                 { "updated_at", FieldValue.ServerTimestamp }
             };
@@ -756,6 +762,10 @@ public class FirestoreService : IFirestoreService
                 TargetLangCode = targetLang,
                 SourceVocabId = request.SourceVocabId,
                 IsFavorite = false,
+                SrsState = "new",
+                SrsRepetitions = 0,
+                SrsEasinessFactor = 2.5,
+                SrsIntervalDays = 0,
                 ImageUrl = string.IsNullOrWhiteSpace(request.ImageUrl)
                     ? null
                     : request.ImageUrl.Trim()
@@ -816,7 +826,7 @@ public class FirestoreService : IFirestoreService
             isFavorite, cardId, deckId, userId);
 
         cardSnapshot = await cardRef.GetSnapshotAsync(cancellationToken);
-        return MapToCardResponse(cardSnapshot);
+        return MapToCardResponse(cardSnapshot, deckId);
     }
 
     /// <inheritdoc />
@@ -916,6 +926,66 @@ public class FirestoreService : IFirestoreService
         if (!deckSnapshot.Exists)
             return new List<CardResponse>();
 
+        var deckName = deckSnapshot.ContainsField("name")
+            ? deckSnapshot.GetValue<string>("name")
+            : string.Empty;
+
+        return await GetDueCardsFromDeckAsync(
+            deckRef,
+            deckId,
+            deckName,
+            limit,
+            cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<List<CardResponse>> GetAllDueCardsAsync(
+        string userId,
+        int limit = 30,
+        CancellationToken cancellationToken = default)
+    {
+        limit = Math.Clamp(limit, 1, 50);
+
+        var decksSnapshot = await _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks")
+            .GetSnapshotAsync(cancellationToken);
+
+        if (decksSnapshot.Count == 0)
+            return new List<CardResponse>();
+
+        var tasks = decksSnapshot.Documents.Select(deckDoc =>
+        {
+            var deckName = deckDoc.ContainsField("name")
+                ? deckDoc.GetValue<string>("name")
+                : string.Empty;
+
+            return GetDueCardsFromDeckAsync(
+                deckDoc.Reference,
+                deckDoc.Id,
+                deckName,
+                limit,
+                cancellationToken);
+        });
+
+        var dueCards = (await Task.WhenAll(tasks))
+            .SelectMany(cards => cards)
+            .GroupBy(card => $"{card.DeckId}/{card.Id}")
+            .Select(group => group.First())
+            .OrderBy(card => card.SrsRepetitions > 0 ? 1 : 0)
+            .ThenBy(card => ParseIsoUtc(card.SrsNextReviewAt) ?? DateTime.MinValue)
+            .Take(limit)
+            .ToList();
+
+        return dueCards;
+    }
+
+    private async Task<List<CardResponse>> GetDueCardsFromDeckAsync(
+        DocumentReference deckRef,
+        string deckId,
+        string deckName,
+        int limit,
+        CancellationToken cancellationToken)
+    {
         var cardsRef = deckRef.Collection("cards");
         var now = Timestamp.FromDateTime(DateTime.UtcNow);
         var result = new List<CardResponse>();
@@ -933,7 +1003,7 @@ public class FirestoreService : IFirestoreService
 
             if (!doc.ContainsField("srs_state") && seenIds.Add(doc.Id))
             {
-                result.Add(MapToCardResponse(doc));
+                result.Add(MapToCardResponse(doc, deckId, deckName));
             }
         }
 
@@ -951,7 +1021,7 @@ public class FirestoreService : IFirestoreService
 
                 if (seenIds.Add(doc.Id))
                 {
-                    result.Add(MapToCardResponse(doc));
+                    result.Add(MapToCardResponse(doc, deckId, deckName));
                 }
             }
         }
@@ -971,12 +1041,76 @@ public class FirestoreService : IFirestoreService
 
                 if (seenIds.Add(doc.Id))
                 {
-                    result.Add(MapToCardResponse(doc));
+                    result.Add(MapToCardResponse(doc, deckId, deckName));
                 }
             }
         }
 
         return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<int> MigrateSrsFieldsAsync(
+        string userId,
+        CancellationToken cancellationToken = default)
+    {
+        var decksSnapshot = await _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks")
+            .GetSnapshotAsync(cancellationToken);
+
+        const int batchLimit = 500;
+        var totalUpdated = 0;
+
+        foreach (var deckDoc in decksSnapshot.Documents)
+        {
+            var cardsSnapshot = await deckDoc.Reference.Collection("cards")
+                .GetSnapshotAsync(cancellationToken);
+
+            var cardsToMigrate = cardsSnapshot.Documents
+                .Where(doc => !doc.ContainsField("srs_state"))
+                .ToList();
+
+            if (cardsToMigrate.Count == 0)
+            {
+                _logger.LogInformation(
+                    "SRS migration skipped deck {DeckId}; all {TotalCards} card(s) already have SRS fields.",
+                    deckDoc.Id,
+                    cardsSnapshot.Count);
+                continue;
+            }
+
+            _logger.LogInformation(
+                "SRS migration updating {CardCount}/{TotalCards} card(s) in deck {DeckId}.",
+                cardsToMigrate.Count,
+                cardsSnapshot.Count,
+                deckDoc.Id);
+
+            foreach (var chunk in cardsToMigrate.Chunk(batchLimit))
+            {
+                var batch = _db.StartBatch();
+
+                foreach (var cardDoc in chunk)
+                {
+                    batch.Update(cardDoc.Reference, new Dictionary<string, object>
+                    {
+                        { "srs_state", "new" },
+                        { "srs_repetitions", 0 },
+                        { "srs_easiness_factor", 2.5 },
+                        { "srs_interval", 0 }
+                    });
+                }
+
+                await batch.CommitAsync(cancellationToken);
+                totalUpdated += chunk.Length;
+            }
+        }
+
+        _logger.LogInformation(
+            "SRS migration completed for user {UserId}. Updated {TotalUpdated} card(s).",
+            userId,
+            totalUpdated);
+
+        return totalUpdated;
     }
 
     /// <inheritdoc />
@@ -1003,7 +1137,7 @@ public class FirestoreService : IFirestoreService
 
             var candidates = cardsSnapshot.Documents
                 .Where(doc => !exclude.Contains(doc.Id))
-                .Select(MapToCardResponse)
+                .Select(doc => MapToCardResponse(doc, candidateDeckId))
                 .Where(card => !string.IsNullOrWhiteSpace(card.Term))
                 .OrderBy(_ => Guid.NewGuid());
 
@@ -1408,6 +1542,13 @@ public class FirestoreService : IFirestoreService
             : null;
     }
 
+    private static DateTime? ParseIsoUtc(string? value)
+    {
+        return DateTimeOffset.TryParse(value, out var parsed)
+            ? parsed.UtcDateTime
+            : null;
+    }
+
     private static string BuildCardIndexKey(
         string normalizedTerm,
         string sourceLang,
@@ -1443,11 +1584,16 @@ public class FirestoreService : IFirestoreService
         };
     }
 
-    private static CardResponse MapToCardResponse(DocumentSnapshot doc)
+    private static CardResponse MapToCardResponse(
+        DocumentSnapshot doc,
+        string deckId = "",
+        string deckName = "")
     {
         return new CardResponse
         {
             Id = doc.Id,
+            DeckId = deckId,
+            DeckName = deckName,
             Term = doc.ContainsField("term") ? doc.GetValue<string>("term") : string.Empty,
             NormalizedTerm = doc.ContainsField("normalized_term") ? doc.GetValue<string>("normalized_term") : string.Empty,
             Translation = doc.ContainsField("translation") ? doc.GetValue<string>("translation") : string.Empty,
@@ -1466,7 +1612,11 @@ public class FirestoreService : IFirestoreService
                 : string.Empty,
             SrsState = doc.ContainsField("srs_state") ? doc.GetValue<string>("srs_state") : "new",
             SrsRepetitions = doc.ContainsField("srs_repetitions") ? doc.GetValue<int>("srs_repetitions") : 0,
+            SrsEasinessFactor = doc.ContainsField("srs_easiness_factor") ? doc.GetValue<double>("srs_easiness_factor") : 2.5,
             SrsIntervalDays = doc.ContainsField("srs_interval") ? doc.GetValue<int>("srs_interval") : 0,
+            SrsNextReviewAt = doc.ContainsField("srs_next_review_at")
+                ? doc.GetValue<Timestamp>("srs_next_review_at").ToDateTimeOffset().ToString("o")
+                : null,
             SrsDistractors = doc.ContainsField("srs_distractors")
                 ? doc.GetValue<List<string>>("srs_distractors")
                 : new List<string>()

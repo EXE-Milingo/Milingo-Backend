@@ -173,6 +173,23 @@ public interface IFirestoreService
         int limit = 20,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Returns due cards across all decks for the current user's daily review.
+    /// First-review cards are included first, then cards due by review date.
+    /// </summary>
+    Task<List<CardResponse>> GetAllDueCardsAsync(
+        string userId,
+        int limit = 30,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// One-time SRS backfill for existing cards. Scans every deck owned by
+    /// the user and writes default SRS fields only to cards missing srs_state.
+    /// </summary>
+    Task<int> MigrateSrsFieldsAsync(
+        string userId,
+        CancellationToken cancellationToken = default);
+
     Task<List<CardResponse>> GetDistractorCardsAsync(
         string userId,
         string deckId,

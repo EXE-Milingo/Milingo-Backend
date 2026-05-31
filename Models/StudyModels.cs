@@ -10,6 +10,9 @@ public class StudyCard
     [JsonPropertyName("deck_id")]
     public string DeckId { get; set; } = string.Empty;
 
+    [JsonPropertyName("deck_name")]
+    public string DeckName { get; set; } = string.Empty;
+
     [JsonPropertyName("term")]
     public string Term { get; set; } = string.Empty;
 
@@ -33,6 +36,9 @@ public class StudyCard
 
     [JsonPropertyName("srs_interval_days")]
     public int SrsIntervalDays { get; set; }
+
+    [JsonPropertyName("is_first_review")]
+    public bool IsFirstReview { get; set; } = true;
 
     [JsonPropertyName("suggested_mode")]
     public string SuggestedMode { get; set; } = "flashcard";

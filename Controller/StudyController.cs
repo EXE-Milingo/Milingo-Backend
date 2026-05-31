@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.DependencyInjection;
 using Milingo.Backend.Extensions;
 using Milingo.Backend.Models;
 using Milingo.Backend.Services;
@@ -12,22 +13,22 @@ namespace Milingo.Backend.Controllers;
 public class StudyController : ControllerBase
 {
     private readonly IFirestoreService _firestoreService;
-    private readonly IOpenAiService _openAiService;
+    private readonly IServiceProvider _serviceProvider;
     private readonly ILogger<StudyController> _logger;
 
     public StudyController(
         IFirestoreService firestoreService,
-        IOpenAiService openAiService,
+        IServiceProvider serviceProvider,
         ILogger<StudyController> logger)
     {
         _firestoreService = firestoreService;
-        _openAiService = openAiService;
+        _serviceProvider = serviceProvider;
         _logger = logger;
     }
 
     [HttpGet("session")]
     public async Task<IActionResult> GetStudySession(
-        [FromQuery] string deckId,
+        [FromQuery] string? deckId,
         [FromQuery] int limit = 20,
         CancellationToken cancellationToken = default)
     {
@@ -35,15 +36,16 @@ public class StudyController : ControllerBase
         if (string.IsNullOrEmpty(userId))
             return Unauthorized(Err("Invalid token."));
 
-        if (string.IsNullOrWhiteSpace(deckId))
-            return BadRequest(Err("deckId is required."));
-
         limit = Math.Clamp(limit, 1, 50);
 
         try
         {
-            var dueCards = await _firestoreService.GetDueCardsAsync(
-                userId, deckId, limit, cancellationToken);
+            var allDecks = string.IsNullOrWhiteSpace(deckId)
+                || string.Equals(deckId, "all", StringComparison.OrdinalIgnoreCase);
+            var requestedDeckId = deckId?.Trim() ?? string.Empty;
+            var dueCards = allDecks
+                ? await _firestoreService.GetAllDueCardsAsync(userId, limit, cancellationToken)
+                : await _firestoreService.GetDueCardsAsync(userId, requestedDeckId, limit, cancellationToken);
 
             if (dueCards.Count == 0)
             {
@@ -51,54 +53,34 @@ public class StudyController : ControllerBase
                 {
                     Status = "success",
                     Message = "No cards due right now. Great work!",
-                    Data = new StudySessionResponse { DeckId = deckId, TotalDue = 0 }
+                    Data = new StudySessionResponse
+                    {
+                        DeckId = allDecks ? string.Empty : requestedDeckId,
+                        DeckName = allDecks ? "All decks" : string.Empty,
+                        TotalDue = 0
+                    }
                 });
             }
 
-            var dueCardIds = dueCards.Select(c => c.Id).ToHashSet();
-            var studyCards = new List<StudyCard>();
-
-            foreach (var card in dueCards)
-            {
-                var suggestedMode = GetSuggestedMode(card);
-                var options = suggestedMode == "mcq"
-                    ? await BuildMcqOptionsAsync(userId, deckId, card, dueCardIds, cancellationToken)
-                    : null;
-
-                if (suggestedMode == "mcq" && options?.Count < 4)
-                {
-                    suggestedMode = "flashcard";
-                    options = null;
-                }
-
-                studyCards.Add(new StudyCard
-                {
-                    CardId = card.Id,
-                    DeckId = deckId,
-                    Term = card.Term,
-                    Translation = card.Translation,
-                    Pronunciation = card.Pronunciation,
-                    ImageUrl = card.ImageUrl,
-                    SrsState = card.SrsState,
-                    SrsRepetitions = card.SrsRepetitions,
-                    SrsIntervalDays = card.SrsIntervalDays,
-                    SuggestedMode = suggestedMode,
-                    Options = options
-                });
-            }
-
-            studyCards = studyCards.OrderBy(_ => Guid.NewGuid()).ToList();
-
+            var studyCards = await BuildStudyCardsAsync(userId, dueCards, cancellationToken);
             var flashcardCount = studyCards.Count(c => c.SuggestedMode == "flashcard");
             var mcqCount = studyCards.Count(c => c.SuggestedMode == "mcq");
+
+            var responseDeckId = allDecks ? string.Empty : requestedDeckId;
+            var responseDeckName = allDecks
+                ? "All decks"
+                : dueCards.FirstOrDefault()?.DeckName ?? string.Empty;
 
             return Ok(new ApiResponse<StudySessionResponse>
             {
                 Status = "success",
-                Message = $"{studyCards.Count} card(s) ready.",
+                Message = allDecks
+                    ? $"{studyCards.Count} card(s) ready across all decks."
+                    : $"{studyCards.Count} card(s) ready.",
                 Data = new StudySessionResponse
                 {
-                    DeckId = deckId,
+                    DeckId = responseDeckId,
+                    DeckName = responseDeckName,
                     Cards = studyCards,
                     TotalDue = dueCards.Count,
                     FlashcardCount = flashcardCount,
@@ -108,9 +90,17 @@ public class StudyController : ControllerBase
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "GetStudySession failed for user {UserId}, deck {DeckId}.", userId, deckId);
+            _logger.LogError(ex, "GetStudySession failed for user {UserId}, deck {DeckId}.", userId, deckId ?? "all");
             return StatusCode(500, Err("An unexpected error occurred."));
         }
+    }
+
+    [HttpGet("daily-session")]
+    public async Task<IActionResult> GetDailySession(
+        [FromQuery] int limit = 30,
+        CancellationToken cancellationToken = default)
+    {
+        return await GetStudySession("all", limit, cancellationToken);
     }
 
     [HttpPost("answer")]
@@ -209,8 +199,75 @@ public class StudyController : ControllerBase
         }
     }
 
+    [HttpPost("migrate-srs")]
+    public async Task<IActionResult> MigrateSrsFields(CancellationToken cancellationToken)
+    {
+        var userId = User.GetFirebaseUid();
+        if (string.IsNullOrEmpty(userId))
+            return Unauthorized(Err("Invalid token."));
+
+        try
+        {
+            var updated = await _firestoreService.MigrateSrsFieldsAsync(userId, cancellationToken);
+
+            return Ok(new ApiResponse<object>
+            {
+                Status = "success",
+                Message = $"SRS migration complete. {updated} card(s) updated.",
+                Data = new { cards_migrated = updated }
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SRS migration failed for user {UserId}.", userId);
+            return StatusCode(500, Err("Migration failed. Check server logs."));
+        }
+    }
+
+    private async Task<List<StudyCard>> BuildStudyCardsAsync(
+        string userId,
+        List<CardResponse> dueCards,
+        CancellationToken cancellationToken)
+    {
+        var dueCardIds = dueCards.Select(c => c.Id).ToHashSet();
+        var studyCards = new List<StudyCard>();
+
+        foreach (var card in dueCards)
+        {
+            var suggestedMode = GetSuggestedMode(card);
+            var options = suggestedMode == "mcq"
+                ? await BuildMcqOptionsAsync(userId, card.DeckId, card, dueCardIds, cancellationToken)
+                : null;
+
+            if (suggestedMode == "mcq" && (options?.Count ?? 0) < 4)
+            {
+                suggestedMode = "flashcard";
+                options = null;
+            }
+
+            studyCards.Add(new StudyCard
+            {
+                CardId = card.Id,
+                DeckId = card.DeckId,
+                DeckName = card.DeckName,
+                Term = card.Term,
+                Translation = card.Translation,
+                Pronunciation = card.Pronunciation,
+                ImageUrl = card.ImageUrl,
+                SrsState = card.SrsState,
+                SrsRepetitions = card.SrsRepetitions,
+                SrsIntervalDays = card.SrsIntervalDays,
+                IsFirstReview = card.SrsRepetitions <= 0,
+                SuggestedMode = suggestedMode,
+                Options = options
+            });
+        }
+
+        return studyCards;
+    }
+
     private static string GetSuggestedMode(CardResponse card) =>
-        card.SrsState is "review" or "mastered" ? "mcq" : "flashcard";
+        card.SrsRepetitions <= 0 ? "flashcard" : "mcq";
 
     private async Task<List<StudyOption>> BuildMcqOptionsAsync(
         string userId,
@@ -285,8 +342,21 @@ public class StudyController : ControllerBase
             _ => card.TargetLangCode
         };
 
-        var distractors = await _openAiService.GenerateDistractorsAsync(
-            card.Term, card.Translation, targetLanguage, cancellationToken);
+        List<string> distractors;
+        try
+        {
+            var openAiService = _serviceProvider.GetRequiredService<IOpenAiService>();
+            distractors = await openAiService.GenerateDistractorsAsync(
+                card.Term, card.Translation, targetLanguage, cancellationToken);
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "AI distractor generation is unavailable for card {CardId}. Falling back to flashcard mode if needed.",
+                card.Id);
+            return new List<string>();
+        }
 
         if (distractors.Count > 0)
         {

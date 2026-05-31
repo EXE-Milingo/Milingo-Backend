@@ -55,6 +55,12 @@ public class CardResponse
     [JsonPropertyName("id")]
     public string Id { get; set; } = string.Empty;
 
+    [JsonPropertyName("deck_id")]
+    public string DeckId { get; set; } = string.Empty;
+
+    [JsonPropertyName("deck_name")]
+    public string DeckName { get; set; } = string.Empty;
+
     [JsonPropertyName("term")]
     public string Term { get; set; } = string.Empty;
 
@@ -99,6 +105,12 @@ public class CardResponse
 
     [JsonPropertyName("srs_interval_days")]
     public int SrsIntervalDays { get; set; }
+
+    [JsonPropertyName("srs_easiness_factor")]
+    public double SrsEasinessFactor { get; set; } = 2.5;
+
+    [JsonPropertyName("srs_next_review_at")]
+    public string? SrsNextReviewAt { get; set; }
 
     [JsonIgnore]
     public List<string> SrsDistractors { get; set; } = new();
