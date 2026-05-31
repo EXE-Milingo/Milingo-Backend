@@ -897,6 +897,329 @@ public class FirestoreService : IFirestoreService
     }
 
     // =================================================================
+    //  STUDY
+    // =================================================================
+
+    /// <inheritdoc />
+    public async Task<List<CardResponse>> GetDueCardsAsync(
+        string userId,
+        string deckId,
+        int limit = 20,
+        CancellationToken cancellationToken = default)
+    {
+        limit = Math.Clamp(limit, 1, 50);
+
+        var deckRef = _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks").Document(deckId);
+
+        var deckSnapshot = await deckRef.GetSnapshotAsync(cancellationToken);
+        if (!deckSnapshot.Exists)
+            return new List<CardResponse>();
+
+        var cardsRef = deckRef.Collection("cards");
+        var now = Timestamp.FromDateTime(DateTime.UtcNow);
+        var result = new List<CardResponse>();
+        var seenIds = new HashSet<string>();
+
+        var brandNewSnapshot = await cardsRef
+            .OrderByDescending("created_at")
+            .Limit(limit * 3)
+            .GetSnapshotAsync(cancellationToken);
+
+        foreach (var doc in brandNewSnapshot.Documents)
+        {
+            if (result.Count >= limit)
+                break;
+
+            if (!doc.ContainsField("srs_state") && seenIds.Add(doc.Id))
+            {
+                result.Add(MapToCardResponse(doc));
+            }
+        }
+
+        if (result.Count < limit)
+        {
+            var newStateSnapshot = await cardsRef
+                .WhereEqualTo("srs_state", "new")
+                .Limit(limit)
+                .GetSnapshotAsync(cancellationToken);
+
+            foreach (var doc in newStateSnapshot.Documents)
+            {
+                if (result.Count >= limit)
+                    break;
+
+                if (seenIds.Add(doc.Id))
+                {
+                    result.Add(MapToCardResponse(doc));
+                }
+            }
+        }
+
+        if (result.Count < limit)
+        {
+            var dueSnapshot = await cardsRef
+                .WhereLessThanOrEqualTo("srs_next_review_at", now)
+                .OrderBy("srs_next_review_at")
+                .Limit(limit)
+                .GetSnapshotAsync(cancellationToken);
+
+            foreach (var doc in dueSnapshot.Documents)
+            {
+                if (result.Count >= limit)
+                    break;
+
+                if (seenIds.Add(doc.Id))
+                {
+                    result.Add(MapToCardResponse(doc));
+                }
+            }
+        }
+
+        return result;
+    }
+
+    /// <inheritdoc />
+    public async Task<List<CardResponse>> GetDistractorCardsAsync(
+        string userId,
+        string deckId,
+        IEnumerable<string> excludeCardIds,
+        int count = 3,
+        CancellationToken cancellationToken = default)
+    {
+        count = Math.Clamp(count, 1, 10);
+
+        var exclude = new HashSet<string>(excludeCardIds);
+        var result = new List<CardResponse>();
+        var usedTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        async Task AddCandidatesFromDeckAsync(string candidateDeckId, int queryLimit)
+        {
+            var cardsSnapshot = await _db.Collection("users").Document(userId)
+                .Collection("flashcard_decks").Document(candidateDeckId)
+                .Collection("cards")
+                .Limit(queryLimit)
+                .GetSnapshotAsync(cancellationToken);
+
+            var candidates = cardsSnapshot.Documents
+                .Where(doc => !exclude.Contains(doc.Id))
+                .Select(MapToCardResponse)
+                .Where(card => !string.IsNullOrWhiteSpace(card.Term))
+                .OrderBy(_ => Guid.NewGuid());
+
+            foreach (var candidate in candidates)
+            {
+                if (result.Count >= count)
+                    return;
+
+                if (usedTerms.Add(candidate.Term))
+                {
+                    result.Add(candidate);
+                }
+            }
+        }
+
+        await AddCandidatesFromDeckAsync(deckId, 50);
+
+        if (result.Count < count)
+        {
+            var decksSnapshot = await _db.Collection("users").Document(userId)
+                .Collection("flashcard_decks")
+                .GetSnapshotAsync(cancellationToken);
+
+            foreach (var deck in decksSnapshot.Documents.OrderBy(_ => Guid.NewGuid()))
+            {
+                if (deck.Id == deckId || result.Count >= count)
+                    continue;
+
+                await AddCandidatesFromDeckAsync(deck.Id, 20);
+            }
+        }
+
+        return result.Take(count).ToList();
+    }
+
+    /// <inheritdoc />
+    public async Task<SubmitStudyAnswerResponse> UpdateCardSrsAsync(
+        string userId,
+        string deckId,
+        string cardId,
+        int quality,
+        string mode,
+        CancellationToken cancellationToken = default)
+    {
+        var cardRef = _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks").Document(deckId)
+            .Collection("cards").Document(cardId);
+        var userRef = _db.Collection("users").Document(userId);
+
+        SubmitStudyAnswerResponse? response = null;
+
+        await _db.RunTransactionAsync(async transaction =>
+        {
+            var cardSnapshot = await transaction.GetSnapshotAsync(cardRef, cancellationToken);
+            if (!cardSnapshot.Exists)
+            {
+                _logger.LogWarning(
+                    "UpdateCardSrs: card '{CardId}' in deck '{DeckId}' not found for user '{UserId}'.",
+                    cardId,
+                    deckId,
+                    userId);
+                return 0;
+            }
+
+            var repetitions = cardSnapshot.ContainsField("srs_repetitions")
+                ? cardSnapshot.GetValue<int>("srs_repetitions")
+                : 0;
+            var easinessFactor = cardSnapshot.ContainsField("srs_easiness_factor")
+                ? cardSnapshot.GetValue<double>("srs_easiness_factor")
+                : 2.5;
+            var intervalDays = cardSnapshot.ContainsField("srs_interval")
+                ? cardSnapshot.GetValue<int>("srs_interval")
+                : 0;
+
+            var srs = Sm2Algorithm.Calculate(
+                repetitions,
+                easinessFactor,
+                intervalDays,
+                quality);
+            var coins = quality >= 3 ? 5 : 0;
+
+            transaction.Update(cardRef, new Dictionary<string, object>
+            {
+                { "srs_state", srs.State },
+                { "srs_repetitions", srs.Repetitions },
+                { "srs_easiness_factor", srs.EasinessFactor },
+                { "srs_interval", srs.IntervalDays },
+                { "srs_next_review_at", Timestamp.FromDateTime(srs.NextReviewAt) },
+                { "srs_last_reviewed_at", FieldValue.ServerTimestamp },
+                { "updated_at", FieldValue.ServerTimestamp }
+            });
+
+            if (coins > 0)
+            {
+                transaction.Set(userRef, new Dictionary<string, object>
+                {
+                    { "coins", FieldValue.Increment(coins) },
+                    { "total_points", FieldValue.Increment(coins) }
+                }, SetOptions.MergeAll);
+            }
+
+            response = new SubmitStudyAnswerResponse
+            {
+                CardId = cardId,
+                Mode = mode,
+                QualityApplied = quality,
+                NewSrsState = srs.State,
+                NewIntervalDays = srs.IntervalDays,
+                NextReviewAt = srs.NextReviewAt.ToString("o"),
+                CoinsAwarded = coins
+            };
+
+            return 0;
+        }, cancellationToken: cancellationToken);
+
+        return response ?? new SubmitStudyAnswerResponse
+        {
+            CardId = cardId,
+            Mode = mode,
+            QualityApplied = quality
+        };
+    }
+
+    /// <inheritdoc />
+    public async Task CacheDistractorsAsync(
+        string userId,
+        string deckId,
+        string cardId,
+        List<string> distractors,
+        CancellationToken cancellationToken = default)
+    {
+        var cleaned = distractors
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(3)
+            .ToList();
+
+        if (cleaned.Count == 0)
+            return;
+
+        var cardRef = _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks").Document(deckId)
+            .Collection("cards").Document(cardId);
+
+        await cardRef.UpdateAsync(new Dictionary<string, object>
+        {
+            { "srs_distractors", cleaned },
+            { "updated_at", FieldValue.ServerTimestamp }
+        }, cancellationToken: cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<DeckStudyStats> GetDeckStudyStatsAsync(
+        string userId,
+        string deckId,
+        CancellationToken cancellationToken = default)
+    {
+        var deckRef = _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks").Document(deckId);
+
+        var deckSnapshot = await deckRef.GetSnapshotAsync(cancellationToken);
+        if (!deckSnapshot.Exists)
+        {
+            return new DeckStudyStats { DeckId = deckId };
+        }
+
+        var snapshot = await deckRef.Collection("cards").GetSnapshotAsync(cancellationToken);
+        var now = DateTime.UtcNow;
+        var stats = new DeckStudyStats
+        {
+            DeckId = deckId,
+            TotalCards = snapshot.Count
+        };
+
+        foreach (var doc in snapshot.Documents)
+        {
+            var state = doc.ContainsField("srs_state")
+                ? doc.GetValue<string>("srs_state")
+                : "new";
+
+            switch (state)
+            {
+                case "learning":
+                    stats.LearningCount++;
+                    break;
+                case "review":
+                    stats.ReviewCount++;
+                    break;
+                case "mastered":
+                    stats.MasteredCount++;
+                    break;
+                default:
+                    stats.NewCount++;
+                    break;
+            }
+
+            var isDue = !doc.ContainsField("srs_next_review_at");
+            if (!isDue)
+            {
+                var nextReviewAt = doc.GetValue<Timestamp>("srs_next_review_at")
+                    .ToDateTimeOffset()
+                    .UtcDateTime;
+                isDue = nextReviewAt <= now;
+            }
+
+            if (isDue)
+            {
+                stats.DueToday++;
+            }
+        }
+
+        return stats;
+    }
+
+    // =================================================================
     //  FLASHCARD UTILITIES
     // =================================================================
 
@@ -1140,7 +1463,13 @@ public class FirestoreService : IFirestoreService
                 : string.Empty,
             UpdatedAt = doc.ContainsField("updated_at")
                 ? doc.GetValue<Timestamp>("updated_at").ToDateTimeOffset().ToString("o")
-                : string.Empty
+                : string.Empty,
+            SrsState = doc.ContainsField("srs_state") ? doc.GetValue<string>("srs_state") : "new",
+            SrsRepetitions = doc.ContainsField("srs_repetitions") ? doc.GetValue<int>("srs_repetitions") : 0,
+            SrsIntervalDays = doc.ContainsField("srs_interval") ? doc.GetValue<int>("srs_interval") : 0,
+            SrsDistractors = doc.ContainsField("srs_distractors")
+                ? doc.GetValue<List<string>>("srs_distractors")
+                : new List<string>()
         };
     }
 

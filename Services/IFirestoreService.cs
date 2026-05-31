@@ -164,6 +164,43 @@ public interface IFirestoreService
         CancellationToken cancellationToken = default);
 
     // =================================================================
+    //  STUDY
+    // =================================================================
+
+    Task<List<CardResponse>> GetDueCardsAsync(
+        string userId,
+        string deckId,
+        int limit = 20,
+        CancellationToken cancellationToken = default);
+
+    Task<List<CardResponse>> GetDistractorCardsAsync(
+        string userId,
+        string deckId,
+        IEnumerable<string> excludeCardIds,
+        int count = 3,
+        CancellationToken cancellationToken = default);
+
+    Task<SubmitStudyAnswerResponse> UpdateCardSrsAsync(
+        string userId,
+        string deckId,
+        string cardId,
+        int quality,
+        string mode,
+        CancellationToken cancellationToken = default);
+
+    Task CacheDistractorsAsync(
+        string userId,
+        string deckId,
+        string cardId,
+        List<string> distractors,
+        CancellationToken cancellationToken = default);
+
+    Task<DeckStudyStats> GetDeckStudyStatsAsync(
+        string userId,
+        string deckId,
+        CancellationToken cancellationToken = default);
+
+    // =================================================================
     //  FLASHCARD UTILITIES
     // =================================================================
 

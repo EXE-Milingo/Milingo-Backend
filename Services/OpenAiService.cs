@@ -58,6 +58,93 @@ public class OpenAiService : IOpenAiService
         return await CallOpenAiAsync(base64Image, mimeType, prompt, cancellationToken);
     }
 
+    /// <inheritdoc />
+    public async Task<List<string>> GenerateDistractorsAsync(
+        string term,
+        string translation,
+        string targetLanguage,
+        CancellationToken cancellationToken = default)
+    {
+        var prompt = $"""
+            You are a language learning assistant.
+            The student is learning {targetLanguage}.
+            The correct vocabulary word is: "{term}" (meaning: "{translation}").
+
+            Generate exactly 3 plausible but incorrect alternative terms in {targetLanguage}
+            that a student might confuse with "{term}".
+            Choose words from a similar category or everyday context.
+
+            Respond only with a JSON array of 3 strings. No explanation. No markdown.
+            """;
+
+        var requestBody = new
+        {
+            model = _model,
+            input = prompt,
+            max_output_tokens = 150
+        };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, ResponsesApiUrl)
+        {
+            Content = new StringContent(JsonSerializer.Serialize(requestBody), Encoding.UTF8, "application/json")
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+
+        HttpResponseMessage response;
+        try
+        {
+            response = await _httpClient.SendAsync(request, cancellationToken);
+        }
+        catch (TaskCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Distractor generation cancelled for term '{Term}'.", term);
+            throw;
+        }
+        catch (TaskCanceledException ex)
+        {
+            _logger.LogWarning(ex, "Distractor generation timed out for term '{Term}'.", term);
+            return new List<string>();
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning(ex, "Distractor generation failed for term '{Term}'.", term);
+            return new List<string>();
+        }
+
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning(
+                "OpenAI distractor generation returned HTTP {StatusCode} for '{Term}': {Body}",
+                (int)response.StatusCode,
+                term,
+                responseBody);
+            return new List<string>();
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(responseBody);
+            var textContent = ExtractOutputText(doc.RootElement) ?? "[]";
+            var cleanJson = textContent
+                .Replace("```json", string.Empty)
+                .Replace("```", string.Empty)
+                .Trim();
+
+            return (JsonSerializer.Deserialize<List<string>>(cleanJson) ?? new List<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(3)
+                .ToList();
+        }
+        catch (Exception ex) when (ex is JsonException or InvalidOperationException)
+        {
+            _logger.LogWarning(ex, "Failed to parse distractor response for term '{Term}': {Body}", term, responseBody);
+            return new List<string>();
+        }
+    }
+
     private async Task<VocabResponse> CallOpenAiAsync(
         string base64Image,
         string mimeType,

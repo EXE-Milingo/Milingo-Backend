@@ -25,4 +25,13 @@ public interface IOpenAiService
         string mimeType,
         string detectionLabel,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Generates plausible but incorrect vocabulary terms for MCQ options.
+    /// </summary>
+    Task<List<string>> GenerateDistractorsAsync(
+        string term,
+        string translation,
+        string targetLanguage,
+        CancellationToken cancellationToken = default);
 }

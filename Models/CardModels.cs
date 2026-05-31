@@ -90,6 +90,18 @@ public class CardResponse
 
     [JsonPropertyName("updated_at")]
     public string UpdatedAt { get; set; } = string.Empty;
+
+    [JsonPropertyName("srs_state")]
+    public string SrsState { get; set; } = "new";
+
+    [JsonPropertyName("srs_repetitions")]
+    public int SrsRepetitions { get; set; }
+
+    [JsonPropertyName("srs_interval_days")]
+    public int SrsIntervalDays { get; set; }
+
+    [JsonIgnore]
+    public List<string> SrsDistractors { get; set; } = new();
 }
 
 public class SavedStatusResponse
