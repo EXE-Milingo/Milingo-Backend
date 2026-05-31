@@ -37,7 +37,14 @@ public static class SupportedLanguages
         new("Italian",  "it", "Tiếng Ý",             "🇮🇹"),
     };
 
-    public static bool IsValid(string language) => All.Contains(language);
+    public static bool IsValid(string language)
+    {
+        return All.Contains(language)
+            || Details.Any(item => string.Equals(
+                item.Code,
+                language,
+                StringComparison.OrdinalIgnoreCase));
+    }
 }
 
 /// <summary>

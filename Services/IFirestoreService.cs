@@ -41,6 +41,16 @@ public interface IFirestoreService
         string targetLanguage,
         CancellationToken cancellationToken = default);
 
+    Task<UserProfileResponse?> GetUserProfileAsync(
+        string uid,
+        CancellationToken cancellationToken = default);
+
+    Task<UserProfileResponse> UpdateUserProfileAsync(
+        string uid,
+        string email,
+        UpdateUserProfileRequest request,
+        CancellationToken cancellationToken = default);
+
     // =================================================================
     //  DECKS
     // =================================================================
@@ -166,6 +176,20 @@ public interface IFirestoreService
         string term,
         string sourceLangCode,
         string targetLangCode,
+        CancellationToken cancellationToken = default);
+
+    // =================================================================
+    //  PREMIUM
+    // =================================================================
+
+    Task SetPremiumAsync(
+        string uid,
+        DateTime expiresAt,
+        string source,
+        CancellationToken cancellationToken = default);
+
+    Task<PremiumStatusResponse> GetPremiumStatusAsync(
+        string uid,
         CancellationToken cancellationToken = default);
 
         // =================================================================

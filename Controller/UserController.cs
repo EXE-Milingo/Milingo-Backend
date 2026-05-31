@@ -22,6 +22,110 @@ public class UserController : ControllerBase
         _logger = logger;
     }
 
+    [HttpGet("me")]
+    public async Task<IActionResult> GetProfile(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uid = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(uid))
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token."
+                });
+
+            var profile = await _firestoreService.GetUserProfileAsync(uid, cancellationToken);
+            if (profile is null)
+                return NotFound(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Profile not found."
+                });
+
+            var email = User.GetFirebaseEmailOrEmpty();
+            if (string.IsNullOrWhiteSpace(profile.Email) && !string.IsNullOrWhiteSpace(email))
+            {
+                profile.Email = email;
+            }
+
+            return Ok(new ApiResponse<UserProfileResponse>
+            {
+                Status = "success",
+                Message = "User profile retrieved successfully.",
+                Data = profile
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting profile for user.");
+            return StatusCode(500, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred."
+            });
+        }
+    }
+
+    [HttpPatch("me")]
+    public async Task<IActionResult> UpdateProfile(
+        [FromBody] UpdateUserProfileRequest? request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uid = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(uid))
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token."
+                });
+
+            request ??= new UpdateUserProfileRequest();
+            if (!ModelState.IsValid)
+                return BadRequest(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = string.Join(
+                        " ",
+                        ModelState.Values
+                            .SelectMany(value => value.Errors)
+                            .Select(error => error.ErrorMessage))
+                });
+
+            var profile = await _firestoreService.UpdateUserProfileAsync(
+                uid,
+                User.GetFirebaseEmailOrEmpty(),
+                request,
+                cancellationToken);
+
+            return Ok(new ApiResponse<UserProfileResponse>
+            {
+                Status = "success",
+                Message = "User profile updated successfully.",
+                Data = profile
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error updating profile for user.");
+            return StatusCode(500, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred."
+            });
+        }
+    }
+
     /// <summary>
     /// Initializes a new user profile in Firestore after Firebase Auth registration.
     /// Idempotent — if the profile already exists, it will NOT be overwritten.

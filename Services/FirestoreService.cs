@@ -327,6 +327,82 @@ public class FirestoreService : IFirestoreService
         }
     }
 
+    /// <inheritdoc />
+    public async Task<UserProfileResponse?> GetUserProfileAsync(
+        string uid,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(uid);
+        var snapshot = await userRef.GetSnapshotAsync(cancellationToken);
+
+        return snapshot.Exists ? MapToUserProfileResponse(uid, snapshot) : null;
+    }
+
+    /// <inheritdoc />
+    public async Task<UserProfileResponse> UpdateUserProfileAsync(
+        string uid,
+        string email,
+        UpdateUserProfileRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(uid);
+        var snapshot = await userRef.GetSnapshotAsync(cancellationToken);
+        var updates = new Dictionary<string, object>
+        {
+            { "updated_at", FieldValue.ServerTimestamp }
+        };
+
+        if (!string.IsNullOrWhiteSpace(email))
+        {
+            updates["email"] = email.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.DisplayName))
+        {
+            updates["display_name"] = request.DisplayName.Trim();
+        }
+
+        if (request.NativeLanguage is not null)
+        {
+            updates["native_language"] = request.NativeLanguage.Trim();
+        }
+
+        if (request.TargetLanguage is not null)
+        {
+            updates["target_language"] = request.TargetLanguage.Trim();
+        }
+
+        if (request.CefrLevel is not null)
+        {
+            updates["cefr_level"] = request.CefrLevel.Trim();
+        }
+
+        if (request.PhotoUrl is not null)
+        {
+            updates["photo_url"] = request.PhotoUrl.Trim();
+        }
+
+        if (!snapshot.Exists)
+        {
+            updates["created_at"] = FieldValue.ServerTimestamp;
+            updates["coins"] = 50;
+            updates["current_streak"] = 0;
+            updates["total_points"] = 50;
+
+            if (!updates.ContainsKey("display_name"))
+            {
+                updates["display_name"] = string.IsNullOrWhiteSpace(email)
+                    ? "Người dùng"
+                    : email.Split('@')[0];
+            }
+        }
+
+        await userRef.SetAsync(updates, SetOptions.MergeAll, cancellationToken);
+
+        var updatedSnapshot = await userRef.GetSnapshotAsync(cancellationToken);
+        return MapToUserProfileResponse(uid, updatedSnapshot);
+    }
+
     // =================================================================
     //  DECKS
     // =================================================================
@@ -899,8 +975,115 @@ public class FirestoreService : IFirestoreService
     }
 
     // =================================================================
+    //  PREMIUM
+    // =================================================================
+
+    /// <inheritdoc />
+    public async Task SetPremiumAsync(
+        string uid,
+        DateTime expiresAt,
+        string source,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(uid);
+        var expiresAtUtc = DateTime.SpecifyKind(expiresAt.ToUniversalTime(), DateTimeKind.Utc);
+
+        await userRef.SetAsync(new Dictionary<string, object>
+        {
+            { "isPremium", true },
+            { "premiumExpiresAt", Timestamp.FromDateTime(expiresAtUtc) },
+            { "premiumSource", source },
+            { "updatedAt", FieldValue.ServerTimestamp }
+        }, SetOptions.MergeAll, cancellationToken);
+
+        _logger.LogInformation(
+            "Premium set for user '{Uid}' via '{Source}' until {ExpiresAt:o}.",
+            uid, source, expiresAtUtc);
+    }
+
+    /// <inheritdoc />
+    public async Task<PremiumStatusResponse> GetPremiumStatusAsync(
+        string uid,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(uid);
+        var snapshot = await userRef.GetSnapshotAsync(cancellationToken);
+
+        if (!snapshot.Exists)
+        {
+            return new PremiumStatusResponse();
+        }
+
+        var isPremiumFlag = snapshot.ContainsField("isPremium")
+            && snapshot.GetValue<bool>("isPremium");
+        var expiresAt = GetTimestampUtc(snapshot, "premiumExpiresAt");
+        var source = snapshot.ContainsField("premiumSource")
+            ? snapshot.GetValue<string?>("premiumSource")
+            : null;
+
+        var isPremium = isPremiumFlag
+            && expiresAt.HasValue
+            && expiresAt.Value > DateTime.UtcNow;
+
+        return new PremiumStatusResponse
+        {
+            IsPremium = isPremium,
+            ExpiresAt = expiresAt,
+            Source = source
+        };
+    }
+
+    // =================================================================
     //  PRIVATE HELPERS
     // =================================================================
+
+    private static DateTime? GetTimestampUtc(DocumentSnapshot snapshot, string fieldName)
+    {
+        if (!snapshot.ContainsField(fieldName))
+            return null;
+
+        return snapshot.GetValue<Timestamp>(fieldName).ToDateTime();
+    }
+
+    private static UserProfileResponse MapToUserProfileResponse(
+        string uid,
+        DocumentSnapshot snapshot)
+    {
+        var expiresAt = GetTimestampUtc(snapshot, "premiumExpiresAt");
+        var isPremiumFlag = snapshot.ContainsField("isPremium")
+            && snapshot.GetValue<bool>("isPremium");
+
+        return new UserProfileResponse
+        {
+            Id = uid,
+            DisplayName = GetString(snapshot, "display_name"),
+            Email = GetString(snapshot, "email"),
+            PhotoUrl = GetNullableString(snapshot, "photo_url"),
+            NativeLanguage = GetNullableString(snapshot, "native_language"),
+            TargetLanguage = GetNullableString(snapshot, "target_language"),
+            CefrLevel = GetString(snapshot, "cefr_level", "A1"),
+            IsPremium = isPremiumFlag
+                && expiresAt.HasValue
+                && expiresAt.Value > DateTime.UtcNow
+        };
+    }
+
+    private static string GetString(
+        DocumentSnapshot snapshot,
+        string fieldName,
+        string fallback = "")
+    {
+        return snapshot.ContainsField(fieldName)
+            ? snapshot.GetValue<string>(fieldName)
+            : fallback;
+    }
+
+    private static string? GetNullableString(DocumentSnapshot snapshot, string fieldName)
+    {
+        return snapshot.ContainsField(fieldName)
+            ? snapshot.GetValue<string?>(fieldName)
+            : null;
+    }
 
     private static string BuildCardIndexKey(
         string normalizedTerm,

@@ -102,6 +102,15 @@ builder.Services.AddHttpClient<IYoloService, YoloService>(client =>
     client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
 });
 
+// PaymentService: PayOS checkout + Google Play subscription verification
+builder.Services.AddHttpClient<IPaymentService, PaymentService>(client =>
+{
+    var timeoutSeconds = builder.Configuration.GetValue<int>("Payments:TimeoutSeconds", 30);
+    client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+    client.DefaultRequestHeaders.Accept.Add(
+        new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+});
+
 // ══════════════════════════════════════════════════════════════════
 //  5. API FRAMEWORK — Controllers, OpenAPI, CORS
 // ══════════════════════════════════════════════════════════════════
