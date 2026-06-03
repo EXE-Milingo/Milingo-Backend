@@ -6,6 +6,7 @@ using Milingo.Backend.Services;
 
 namespace Milingo.Backend.Controllers;
 
+//payment
 [ApiController]
 [Route("api/v1/payments")]
 [Authorize]
