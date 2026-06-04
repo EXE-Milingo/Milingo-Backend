@@ -47,6 +47,9 @@ jobs:
             OpenAI__ApiKey=${{ secrets.AI_API_KEY }}
             OpenAI__Model=gpt-5.4-mini
             OpenAI__TimeoutSeconds=30
+            PayOS__ClientId=${{ secrets.PAYOS_CLIENT_ID }}
+            PayOS__ApiKey=${{ secrets.PAYOS_API_KEY }}
+            PayOS__ChecksumKey=${{ secrets.PAYOS_CHECKSUM_KEY }}
             EOF
 
             mkdir -p secrets
