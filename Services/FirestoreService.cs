@@ -130,7 +130,7 @@ public class FirestoreService : IFirestoreService
                 SetOptions.MergeAll);
 
             var newVocabDoc = vocabCollection.Document();
-            transaction.Set(newVocabDoc, new Dictionary<string, object>
+            var vocabData = new Dictionary<string, object>
             {
                 { "keyword", vocab.Keyword },
                 { "translation", vocab.Translation },
@@ -138,7 +138,21 @@ public class FirestoreService : IFirestoreService
                 { "example_sentence", vocab.ExampleSentence },
                 { "mastery_level", 0.0 },
                 { "created_at", FieldValue.ServerTimestamp }
-            });
+            };
+
+            if (vocab.RelatedWords.Count > 0)
+            {
+                vocabData["related_words"] = vocab.RelatedWords
+                    .Select(word => new Dictionary<string, object>
+                    {
+                        { "keyword", word.Keyword },
+                        { "translation", word.Translation },
+                        { "pronunciation", word.Pronunciation }
+                    })
+                    .ToList();
+            }
+
+            transaction.Set(newVocabDoc, vocabData);
 
             return true;
 
@@ -272,6 +286,17 @@ public class FirestoreService : IFirestoreService
                     vocabData["detection_label"] = item.DetectionLabel;
                 if (item.DetectionConfidence is not null)
                     vocabData["detection_confidence"] = item.DetectionConfidence.Value;
+                if (item.RelatedWords.Count > 0)
+                {
+                    vocabData["related_words"] = item.RelatedWords
+                        .Select(word => new Dictionary<string, object>
+                        {
+                            { "keyword", word.Keyword },
+                            { "translation", word.Translation },
+                            { "pronunciation", word.Pronunciation }
+                        })
+                        .ToList();
+                }
 
                 transaction.Set(newVocabDoc, vocabData);
             }

@@ -58,6 +58,9 @@ public class SnapVocabItem
     [JsonPropertyName("cropped_image_base64")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? CroppedImageBase64 { get; set; }
+
+    [JsonPropertyName("related_words")]
+    public List<RelatedWordResponse> RelatedWords { get; set; } = new();
 }
 
 public class SnapBoundingBox
@@ -153,6 +156,9 @@ public class AnalyzeDetectedSnapRequest
 {
     [JsonPropertyName("objects")]
     public List<SnapDetectedObject> Objects { get; set; } = new();
+
+    [JsonPropertyName("targetLanguage")]
+    public string? TargetLanguage { get; set; }
 }
 
 /// <summary>

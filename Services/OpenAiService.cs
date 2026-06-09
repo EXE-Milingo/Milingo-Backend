@@ -38,13 +38,18 @@ public class OpenAiService : IOpenAiService
     public async Task<VocabResponse> AnalyzeImageAsync(
         Stream imageStream,
         string mimeType,
+        string targetLanguage,
         CancellationToken cancellationToken = default)
     {
         using var memoryStream = new MemoryStream();
         await imageStream.CopyToAsync(memoryStream, cancellationToken);
         var base64Image = Convert.ToBase64String(memoryStream.ToArray());
 
-        return await CallOpenAiAsync(base64Image, mimeType, BuildFullImagePrompt(), cancellationToken);
+        return await CallOpenAiAsync(
+            base64Image,
+            mimeType,
+            BuildFullImagePrompt(targetLanguage),
+            cancellationToken);
     }
 
     /// <inheritdoc />
@@ -52,9 +57,10 @@ public class OpenAiService : IOpenAiService
         string base64Image,
         string mimeType,
         string detectionLabel,
+        string targetLanguage,
         CancellationToken cancellationToken = default)
     {
-        var prompt = BuildCroppedObjectPrompt(detectionLabel);
+        var prompt = BuildCroppedObjectPrompt(detectionLabel, targetLanguage);
         return await CallOpenAiAsync(base64Image, mimeType, prompt, cancellationToken);
     }
 
@@ -187,19 +193,43 @@ public class OpenAiService : IOpenAiService
                             keyword = new { type = "string" },
                             translation = new { type = "string" },
                             pronunciation = new { type = "string" },
-                            example_sentence = new { type = "string" }
+                            example_sentence = new { type = "string" },
+                            related_words = new
+                            {
+                                type = "array",
+                                minItems = 3,
+                                maxItems = 3,
+                                items = new
+                                {
+                                    type = "object",
+                                    additionalProperties = false,
+                                    properties = new
+                                    {
+                                        keyword = new { type = "string" },
+                                        translation = new { type = "string" },
+                                        pronunciation = new { type = "string" }
+                                    },
+                                    required = new[]
+                                    {
+                                        "keyword",
+                                        "translation",
+                                        "pronunciation"
+                                    }
+                                }
+                            }
                         },
                         required = new[]
                         {
                             "keyword",
                             "translation",
                             "pronunciation",
-                            "example_sentence"
+                            "example_sentence",
+                            "related_words"
                         }
                     }
                 }
             },
-            max_output_tokens = 500
+            max_output_tokens = 800
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, ResponsesApiUrl)
@@ -239,26 +269,53 @@ public class OpenAiService : IOpenAiService
         return ParseOpenAiResponse(responseBody);
     }
 
-    private static string BuildFullImagePrompt()
+    private static string BuildFullImagePrompt(string targetLanguage)
     {
+        var language = NormalizeTargetLanguage(targetLanguage);
         return "Analyze this image and identify the main object. " +
                "Return JSON with exactly these keys: " +
-               "keyword, translation, pronunciation, example_sentence. " +
-               "keyword must be the English word for the object. " +
+               "keyword, translation, pronunciation, example_sentence, related_words. " +
+               $"The student is learning {language}. " +
+               $"keyword must be the most natural {language} word for the object, not English unless {language} is English. " +
                "translation must be the Vietnamese meaning. " +
-               "pronunciation must be IPA phonetic transcription. " +
-               "example_sentence must be a simple bilingual example sentence.";
+               "pronunciation must be IPA, romanization, or common reading for the keyword. " +
+               $"example_sentence must be a simple sentence in {language} using the keyword, followed by a Vietnamese meaning. " +
+               $"related_words must contain exactly 3 useful {language} vocabulary words related to the object, each with Vietnamese translation and pronunciation.";
     }
 
-    private static string BuildCroppedObjectPrompt(string detectionLabel)
+    private static string BuildCroppedObjectPrompt(string detectionLabel, string targetLanguage)
     {
+        var language = NormalizeTargetLanguage(targetLanguage);
         return $"This image shows a cropped object detected as '{detectionLabel}'. " +
                "Analyze this object and return JSON with exactly these keys: " +
-               "keyword, translation, pronunciation, example_sentence. " +
-               "keyword must be the most accurate English word for this specific object. " +
+               "keyword, translation, pronunciation, example_sentence, related_words. " +
+               $"The student is learning {language}. " +
+               $"keyword must be the most accurate {language} word for this specific object, not English unless {language} is English. " +
                "translation must be the Vietnamese meaning. " +
-               "pronunciation must be IPA phonetic transcription. " +
-               "example_sentence must be a simple bilingual example sentence using the keyword.";
+               "pronunciation must be IPA, romanization, or common reading for the keyword. " +
+               $"example_sentence must be a simple sentence in {language} using the keyword, followed by a Vietnamese meaning. " +
+               $"related_words must contain exactly 3 useful {language} vocabulary words related to the object, each with Vietnamese translation and pronunciation.";
+    }
+
+    private static string NormalizeTargetLanguage(string targetLanguage)
+    {
+        var value = string.IsNullOrWhiteSpace(targetLanguage)
+            ? "en"
+            : targetLanguage.Trim();
+
+        var supported = SupportedLanguages.Details.FirstOrDefault(item =>
+            string.Equals(item.Code, value, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(item.Name, value, StringComparison.OrdinalIgnoreCase));
+
+        if (supported is not null)
+            return supported.Name;
+
+        return value.ToLowerInvariant() switch
+        {
+            "th" => "Thai",
+            "vi" => "Vietnamese",
+            _ => value
+        };
     }
 
     private VocabResponse ParseOpenAiResponse(string rawResponse)

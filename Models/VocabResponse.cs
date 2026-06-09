@@ -19,4 +19,19 @@ public class VocabResponse
 
     [JsonPropertyName("example_sentence")]
     public string ExampleSentence { get; set; } = string.Empty;
+
+    [JsonPropertyName("related_words")]
+    public List<RelatedWordResponse> RelatedWords { get; set; } = new();
+}
+
+public class RelatedWordResponse
+{
+    [JsonPropertyName("keyword")]
+    public string Keyword { get; set; } = string.Empty;
+
+    [JsonPropertyName("translation")]
+    public string Translation { get; set; } = string.Empty;
+
+    [JsonPropertyName("pronunciation")]
+    public string Pronunciation { get; set; } = string.Empty;
 }

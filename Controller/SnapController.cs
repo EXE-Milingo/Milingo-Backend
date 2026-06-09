@@ -161,6 +161,7 @@ public class SnapController : ControllerBase
     [RequestSizeLimit(10 * 1024 * 1024)] // 10 MB max upload size
     public async Task<IActionResult> AnalyzeSnap(
         IFormFile image,
+        [FromForm] string? targetLanguage,
         CancellationToken cancellationToken)
     {
         try
@@ -175,6 +176,8 @@ public class SnapController : ControllerBase
                     Message = "Invalid token: User identifier not found in claims."
                 });
             }
+            var resolvedTargetLanguage = await ResolveTargetLanguageAsync(
+                targetLanguage, userId, cancellationToken);
 
             // --- 2. IDEMPOTENCY KEY: Extract from request header ---
             if (!Request.Headers.TryGetValue("Idempotency-Key", out var idempotencyKeyValues)
@@ -278,7 +281,8 @@ public class SnapController : ControllerBase
             {
                 // -- MULTI-OBJECT PATH: Analyse each cropped object --
                 usedFallback = false;
-                vocabItems = await AnalyzeCroppedObjectsAsync(yoloResult!.Objects, cancellationToken);
+                vocabItems = await AnalyzeCroppedObjectsAsync(
+                    yoloResult!.Objects, resolvedTargetLanguage, cancellationToken);
 
                 // Capture detection details for Firestore
                 detectionDetails = yoloResult.Objects.Select(o => new SnapDetectionDetail
@@ -302,7 +306,7 @@ public class SnapController : ControllerBase
                     usedFallback = true;
                     detectionDetails.Clear();
                     vocabItems = await AnalyzeFullImageFallbackAsync(
-                        imageBytes, image.ContentType, cancellationToken);
+                        imageBytes, image.ContentType, resolvedTargetLanguage, cancellationToken);
                 }
             }
             else
@@ -311,7 +315,7 @@ public class SnapController : ControllerBase
                 _logger.LogInformation("YOLO returned no valid objects, using full-image fallback.");
                 usedFallback = true;
                 vocabItems = await AnalyzeFullImageFallbackAsync(
-                    imageBytes, image.ContentType, cancellationToken);
+                    imageBytes, image.ContentType, resolvedTargetLanguage, cancellationToken);
             }
 
             // --- 10. PERSISTENCE: Save vocabs, coins, cache response (with idempotency) ---
@@ -432,7 +436,10 @@ public class SnapController : ControllerBase
                 });
             }
 
-            var vocabItems = await AnalyzeDetectedObjectsAsync(detections, cancellationToken);
+            var resolvedTargetLanguage = await ResolveTargetLanguageAsync(
+                request?.TargetLanguage, userId, cancellationToken);
+            var vocabItems = await AnalyzeDetectedObjectsAsync(
+                detections, resolvedTargetLanguage, cancellationToken);
             if (vocabItems.Count == 0)
             {
                 return UnprocessableEntity(new ApiResponse<object>
@@ -536,6 +543,7 @@ public class SnapController : ControllerBase
     /// </summary>
     private async Task<List<SnapVocabItem>> AnalyzeCroppedObjectsAsync(
         List<DetectedObject> detections,
+        string targetLanguage,
         CancellationToken cancellationToken)
     {
         var tasks = detections.Select(async det =>
@@ -546,6 +554,7 @@ public class SnapController : ControllerBase
                     det.CroppedImageBase64,
                     "image/jpeg", // Crops are always JPEG from YOLO service
                     det.Label,
+                    targetLanguage,
                     cancellationToken);
 
                 return new SnapVocabItem
@@ -554,6 +563,7 @@ public class SnapController : ControllerBase
                     Translation = vocab.Translation,
                     Pronunciation = vocab.Pronunciation,
                     ExampleSentence = vocab.ExampleSentence,
+                    RelatedWords = vocab.RelatedWords,
                     DetectionLabel = det.Label,
                     DetectionConfidence = det.Confidence,
                     BoundingBox = new SnapBoundingBox
@@ -634,6 +644,7 @@ public class SnapController : ControllerBase
     /// </summary>
     private async Task<List<SnapVocabItem>> AnalyzeDetectedObjectsAsync(
         List<SnapDetectedObject> detections,
+        string targetLanguage,
         CancellationToken cancellationToken)
     {
         var tasks = detections.Select(async det =>
@@ -645,6 +656,7 @@ public class SnapController : ControllerBase
                     det.CroppedImageBase64,
                     "image/jpeg",
                     label,
+                    targetLanguage,
                     cancellationToken);
 
                 return new SnapVocabItem
@@ -653,6 +665,7 @@ public class SnapController : ControllerBase
                     Translation = vocab.Translation,
                     Pronunciation = vocab.Pronunciation,
                     ExampleSentence = vocab.ExampleSentence,
+                    RelatedWords = vocab.RelatedWords,
                     DetectionLabel = det.Label,
                     DetectionConfidence = det.Confidence,
                     BoundingBox = det.BoundingBox,
@@ -683,10 +696,12 @@ public class SnapController : ControllerBase
     private async Task<List<SnapVocabItem>> AnalyzeFullImageFallbackAsync(
         byte[] imageBytes,
         string mimeType,
+        string targetLanguage,
         CancellationToken cancellationToken)
     {
         using var stream = new MemoryStream(imageBytes);
-        var vocab = await _openAiService.AnalyzeImageAsync(stream, mimeType, cancellationToken);
+        var vocab = await _openAiService.AnalyzeImageAsync(
+            stream, mimeType, targetLanguage, cancellationToken);
 
         return new List<SnapVocabItem>
         {
@@ -696,10 +711,30 @@ public class SnapController : ControllerBase
                 Translation = vocab.Translation,
                 Pronunciation = vocab.Pronunciation,
                 ExampleSentence = vocab.ExampleSentence,
+                RelatedWords = vocab.RelatedWords,
                 DetectionLabel = null,
                 DetectionConfidence = null
             }
         };
+    }
+
+    private static string ResolveTargetLanguage(string? targetLanguage)
+    {
+        return string.IsNullOrWhiteSpace(targetLanguage)
+            ? "en"
+            : targetLanguage.Trim();
+    }
+
+    private async Task<string> ResolveTargetLanguageAsync(
+        string? targetLanguage,
+        string userId,
+        CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(targetLanguage))
+            return targetLanguage.Trim();
+
+        var profile = await _firestoreService.GetUserProfileAsync(userId, cancellationToken);
+        return ResolveTargetLanguage(profile?.TargetLanguage);
     }
 
     // =================================================================

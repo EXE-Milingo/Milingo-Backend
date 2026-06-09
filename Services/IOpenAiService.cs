@@ -14,6 +14,7 @@ public interface IOpenAiService
     Task<VocabResponse> AnalyzeImageAsync(
         Stream imageStream,
         string mimeType,
+        string targetLanguage,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -24,6 +25,7 @@ public interface IOpenAiService
         string base64Image,
         string mimeType,
         string detectionLabel,
+        string targetLanguage,
         CancellationToken cancellationToken = default);
 
     /// <summary>
