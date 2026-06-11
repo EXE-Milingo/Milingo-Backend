@@ -1,0 +1,355 @@
+diff --git a/lib/core/network/milingo_models.dart b/lib/core/network/milingo_models.dart
+index 9aa5ec3..f281163 100644
+--- a/lib/core/network/milingo_models.dart
++++ b/lib/core/network/milingo_models.dart
+@@ -742,6 +742,32 @@ class CreatePayOSOrderResponse {
+   final String paymentLinkId;
+ }
+ 
++class SubscriptionPlanResponse {
++  const SubscriptionPlanResponse({
++    required this.planId,
++    required this.planName,
++    required this.amount,
++    required this.durationDays,
++  });
++
++  factory SubscriptionPlanResponse.fromJson(Map<String, dynamic> json) {
++    return SubscriptionPlanResponse(
++      planId: (json['planId'] ?? '').toString(),
++      planName: (json['planName'] ?? '').toString(),
++      amount: (json['amount'] as num?)?.toInt() ?? 0,
++      durationDays: (json['durationDays'] as num?)?.toInt() ?? 0,
++    );
++  }
++
++  final String planId;
++  final String planName;
++  final int amount;
++  final int durationDays;
++}
++
+ class PremiumStatusResponse {
+   const PremiumStatusResponse({
+     required this.isPremium,
+diff --git a/lib/core/network/milingo_api_service.dart b/lib/core/network/milingo_api_service.dart
+index 8d20c48..d19c738 100644
+--- a/lib/core/network/milingo_api_service.dart
++++ b/lib/core/network/milingo_api_service.dart
+@@ -247,6 +247,23 @@ class MilingoApiService {
+     }
+   }
+ 
++  Future<List<SubscriptionPlanResponse>> getSubscriptionPlans() async {
++    try {
++      final response = await _dio.get('/api/v1/payments/plans');
++      return _unwrap(response, (data) {
++        final list = data as List<dynamic>? ?? const [];
++        return list
++            .map(
++              (item) => SubscriptionPlanResponse.fromJson(
++                item as Map<String, dynamic>,
++              ),
++            )
++            .toList();
++      });
++    } on DioException catch (e) {
++      throw MilingoApiException(_userFriendlyError(e));
++    }
++  }
++
+   Future<CreatePayOSOrderResponse> createPayOSOrder({
+     required String planId,
+     required String returnUrl,
+diff --git a/lib/features/premium/widgets/premium_upgrade_view.dart b/lib/features/premium/widgets/premium_upgrade_view.dart
+index 7a281f1..17b763b 100644
+--- a/lib/features/premium/widgets/premium_upgrade_view.dart
++++ b/lib/features/premium/widgets/premium_upgrade_view.dart
+@@ -1,5 +1,7 @@
+ import 'package:flutter/material.dart';
+ import 'package:flutter_svg/flutter_svg.dart';
++import 'package:intl/intl.dart';
++import 'package:milingo/core/network/milingo_models.dart';
+ 
+ class PremiumPlan {
+   const PremiumPlan({
+@@ -12,6 +14,31 @@ class PremiumPlan {
+     this.accentColor = _PremiumColors.orange,
+   });
+ 
++  factory PremiumPlan.fromApi(SubscriptionPlanResponse plan) {
++    final formattedPrice = NumberFormat.decimalPattern('en_US')
++        .format(plan.amount)
++        .replaceAll(',', '.');
++    final unit = switch (plan.durationDays) {
++      7 => '/ Tuần',
++      30 => '/ tháng',
++      365 => '/ Năm',
++      _ => '/ ${plan.durationDays} ngày',
++    };
++
++    return PremiumPlan(
++      id: plan.planId,
++      name: plan.planName,
++      priceText: '$formattedPriceđ',
++      unit: unit,
++      features: _premiumFeatures,
++      badge: switch (plan.planId) {
++        'pro' => 'PHỔ BIẾN NHẤT',
++        'ultra' => 'PHỔ BIẾN',
++        _ => null,
++      },
++      showStar: plan.planId == 'ultra',
++      accentColor: plan.planId == 'ultra'
++          ? _PremiumColors.lightOrange
++          : _PremiumColors.orange,
++    );
++  }
++
+   final String id;
+   final String name;
+   final String priceText;
+@@ -25,14 +52,14 @@ class PremiumPlan {
+ 
+ const premiumPlans = [
+   PremiumPlan(
+-    id: 'plus_monthly',
++    id: 'plus',
+     name: 'Gói Plus',
+     priceText: '59.000đ',
+     unit: '/ Tuần',
+     features: _premiumFeatures,
+   ),
+   PremiumPlan(
+-    id: 'pro_monthly',
++    id: 'pro',
+     name: 'Gói Pro',
+     priceText: '139.000đ',
+     unit: '/ tháng',
+@@ -40,8 +67,8 @@ const premiumPlans = [
+     features: _premiumFeatures,
+   ),
+   PremiumPlan(
+-    id: 'pro_yearly',
+-    name: 'Gói Pro',
++    id: 'ultra',
++    name: 'Gói Ultra',
+     priceText: '510.000đ',
+     unit: '/ Năm',
+     badge: 'PHỔ BIẾN',
+@@ -63,6 +90,7 @@ class PremiumUpgradeView extends StatelessWidget {
+   const PremiumUpgradeView({
++    required this.plans,
+     required this.selectedPlanId,
+     required this.isStartingPayment,
+     required this.onClose,
+@@ -75,6 +103,7 @@ class PremiumUpgradeView extends StatelessWidget {
+     super.key,
+   });
+ 
++  final List<PremiumPlan> plans;
+   final String selectedPlanId;
+   final bool isStartingPayment;
+   final VoidCallback onClose;
+@@ -109,6 +138,7 @@ class PremiumUpgradeView extends StatelessWidget {
+                       const _PremiumHero(),
+                       const SizedBox(height: 40),
+                       _PremiumPlanList(
++                        plans: plans,
+                         selectedPlanId: selectedPlanId,
+                         onPlanSelected: onPlanSelected,
+                       ),
+@@ -272,11 +302,13 @@ class _PremiumGlyph extends StatelessWidget {
+ 
+ class _PremiumPlanList extends StatelessWidget {
+   const _PremiumPlanList({
++    required this.plans,
+     required this.selectedPlanId,
+     required this.onPlanSelected,
+   });
+ 
++  final List<PremiumPlan> plans;
+   final String selectedPlanId;
+   final ValueChanged<PremiumPlan> onPlanSelected;
+ 
+@@ -284,13 +316,13 @@ class _PremiumPlanList extends StatelessWidget {
+   Widget build(BuildContext context) {
+     return Column(
+       children: [
+-        for (final plan in premiumPlans) ...[
++        for (final plan in plans) ...[
+           _PremiumPlanCard(
+             plan: plan,
+             selected: plan.id == selectedPlanId,
+             onTap: () => onPlanSelected(plan),
+           ),
+-          if (plan != premiumPlans.last) const SizedBox(height: 24),
++          if (plan != plans.last) const SizedBox(height: 24),
+         ],
+       ],
+     );
+diff --git a/lib/features/premium/widgets/payment_method_view.dart b/lib/features/premium/widgets/payment_method_view.dart
+index 32b98e1..68c678f 100644
+--- a/lib/features/premium/widgets/payment_method_view.dart
++++ b/lib/features/premium/widgets/payment_method_view.dart
+@@ -9,9 +9,9 @@ class PaymentMethodPlanSummary {
+ 
+   factory PaymentMethodPlanSummary.fromPremiumPlan(PremiumPlan plan) {
+     final duration = switch (plan.id) {
+-      'plus_monthly' => '1 Tuần',
+-      'pro_monthly' => '1 Tháng',
+-      'pro_yearly' => '12 Tháng',
++      'plus' => '1 Tuần',
++      'pro' => '1 Tháng',
++      'ultra' => '1 Năm',
+       _ => plan.unit.replaceAll('/', '').trim(),
+     };
+ 
+diff --git a/lib/features/premium/screens/premium_screen.dart b/lib/features/premium/screens/premium_screen.dart
+index 4cf10ce..285f8bb 100644
+--- a/lib/features/premium/screens/premium_screen.dart
++++ b/lib/features/premium/screens/premium_screen.dart
+@@ -1,17 +1,46 @@
+ import 'package:flutter/material.dart';
++import 'package:flutter_riverpod/flutter_riverpod.dart';
+ import 'package:go_router/go_router.dart';
+ import 'package:milingo/core/constants/app_constants.dart';
++import 'package:milingo/core/network/milingo_api_service.dart';
+ import 'package:milingo/features/premium/widgets/premium_upgrade_view.dart';
+ 
+-class PremiumScreen extends StatefulWidget {
++class PremiumScreen extends ConsumerStatefulWidget {
+   const PremiumScreen({super.key});
+ 
+   @override
+-  State<PremiumScreen> createState() => _PremiumScreenState();
++  ConsumerState<PremiumScreen> createState() => _PremiumScreenState();
+ }
+ 
+-class _PremiumScreenState extends State<PremiumScreen> {
++class _PremiumScreenState extends ConsumerState<PremiumScreen> {
++  List<PremiumPlan> _plans = premiumPlans;
+   String _selectedPlanId = premiumPlans[1].id;
+ 
++  PremiumPlan get _selectedPlan {
++    return _plans.firstWhere(
++      (plan) => plan.id == _selectedPlanId,
++      orElse: () => _plans.first,
++    );
++  }
++
++  @override
++  void initState() {
++    super.initState();
++    _loadPlans();
++  }
++
++  Future<void> _loadPlans() async {
++    try {
++      final response =
++          await ref.read(milingoApiServiceProvider).getSubscriptionPlans();
++      final plans = response.map(PremiumPlan.fromApi).toList();
++      if (!mounted || plans.isEmpty) return;
++
++      setState(() {
++        _plans = plans;
++        if (!_plans.any((plan) => plan.id == _selectedPlanId)) {
++          _selectedPlanId = _plans.first.id;
++        }
++      });
++    } catch (_) {
++      // Keep local catalog available when backend cannot be reached.
++    }
++  }
++
+   void _close() {
+     if (Navigator.of(context).canPop()) {
+       context.pop();
+@@ -24,6 +53,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
+   @override
+   Widget build(BuildContext context) {
+     return PremiumUpgradeView(
++      plans: _plans,
+       selectedPlanId: _selectedPlanId,
+       isStartingPayment: false,
+       onClose: _close,
+@@ -32,7 +62,7 @@ class _PremiumScreenState extends State<PremiumScreen> {
+       onStartPayment: () {
+         context.push(
+           AppConstants.paymentMethodRoute,
+-          extra: _selectedPlanId,
++          extra: _selectedPlan,
+         );
+       },
+       onRestorePurchases: () => context.push(AppConstants.subscriptionRoute),
+diff --git a/lib/features/premium/screens/payment_method_screen.dart b/lib/features/premium/screens/payment_method_screen.dart
+index d4fb767..70b5250 100644
+--- a/lib/features/premium/screens/payment_method_screen.dart
++++ b/lib/features/premium/screens/payment_method_screen.dart
+@@ -10,9 +10,11 @@ import 'package:url_launcher/url_launcher.dart';
+ 
+ class PaymentMethodScreen extends ConsumerStatefulWidget {
+   const PaymentMethodScreen({
++    this.selectedPlan,
+     this.selectedPlanId,
+     super.key,
+   });
+ 
++  final PremiumPlan? selectedPlan;
+   final String? selectedPlanId;
+ 
+   @override
+@@ -25,6 +27,8 @@ class _PaymentMethodScreenState extends ConsumerState<PaymentMethodScreen> {
+   bool _isConfirming = false;
+ 
+   PremiumPlan get _selectedPlan {
++    final selectedPlan = widget.selectedPlan;
++    if (selectedPlan != null) return selectedPlan;
+     return premiumPlans.firstWhere(
+       (plan) => plan.id == widget.selectedPlanId,
+       orElse: () => premiumPlans[1],
+diff --git a/lib/core/routing/app_router.dart b/lib/core/routing/app_router.dart
+index cb0b08a..c5c3fc9 100644
+--- a/lib/core/routing/app_router.dart
++++ b/lib/core/routing/app_router.dart
+@@ -20,6 +20,7 @@ import 'package:milingo/features/premium/screens/premium_screen.dart';
+ import 'package:milingo/features/premium/screens/subscription_management_screen.dart';
+ import 'package:milingo/features/premium/screens/terms_of_service_screen.dart';
+ import 'package:milingo/features/premium/screens/transaction_history_screen.dart';
++import 'package:milingo/features/premium/widgets/premium_upgrade_view.dart';
+ import 'package:milingo/features/profile/screens/profile_screen.dart';
+ import 'package:milingo/features/snap_and_learn/screens/snap_and_learn_screen.dart';
+ import 'package:milingo/features/splash/screens/splash_screen.dart';
+@@ -178,8 +179,13 @@ final appRouterProvider = Provider<GoRouter>((ref) {
+         path: AppConstants.paymentMethodRoute,
+         name: 'payment-method',
+         builder: (context, state) {
+-          final planId = state.extra as String?;
+-          return PaymentMethodScreen(selectedPlanId: planId);
++          final extra = state.extra;
++          return PaymentMethodScreen(
++            selectedPlan: extra is PremiumPlan ? extra : null,
++            selectedPlanId: extra is String ? extra : null,
++          );
+         },
+       ),
+diff --git a/test/payment_method_view_test.dart b/test/payment_method_view_test.dart
+index 56fd73d..ff2c9f5 100644
+--- a/test/payment_method_view_test.dart
++++ b/test/payment_method_view_test.dart
+@@ -8,7 +8,7 @@ void main() {
+     PaymentPlanSummary? confirmedPlan;
+ 
+     const plan = PaymentPlanSummary(
+-      planId: 'pro_monthly',
++      planId: 'pro',
+       planLabel: 'Milingo Premium - 1 Thang',
+       totalLabel: '139,000 d',
+       buttonTotalLabel: '139,000 d',
+@@ -50,6 +50,6 @@ void main() {
+ 
+     expect(confirmedMethod?.id, 'bank_qr');
+-    expect(confirmedPlan?.planId, 'pro_monthly');
++    expect(confirmedPlan?.planId, 'pro');
+   });
+ }

@@ -26,6 +26,26 @@ public class PaymentController : ControllerBase
         _logger = logger;
     }
 
+    [HttpGet("plans")]
+    public IActionResult GetSubscriptionPlans()
+    {
+        try
+        {
+            return Ok(new ApiResponse<IReadOnlyList<SubscriptionPlanResponse>>
+            {
+                Status = "success",
+                Message = "Subscription plans retrieved successfully.",
+                Data = _paymentService.GetSubscriptionPlans()
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error getting subscription plans.");
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                ErrorResponse("An unexpected error occurred. Please try again."));
+        }
+    }
+
     [HttpPost("payos/create-order")]
     public async Task<IActionResult> CreatePayOSOrder(
         [FromBody] CreatePayOSOrderRequest request,
@@ -58,6 +78,10 @@ public class PaymentController : ControllerBase
         {
             _logger.LogInformation("Create PayOS order request cancelled: client disconnected.");
             return StatusCode(499);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ErrorResponse(ex.Message));
         }
         catch (Exception ex)
         {

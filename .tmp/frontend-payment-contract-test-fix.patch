@@ -1,0 +1,11 @@
+diff --git a/test/payment_plan_contract_test.dart b/test/payment_plan_contract_test.dart
+index b94280b..93d5b85 100644
+--- a/test/payment_plan_contract_test.dart
++++ b/test/payment_plan_contract_test.dart
+@@ -41,3 +41,6 @@ void main() {
+ 
+     expect(plans.map((plan) => plan.id), ['plus', 'pro', 'ultra']);
+     expect(plans.map((plan) => plan.priceText), ['59.000đ', '139.000đ', '510.000đ']);
++    expect(plans.map((plan) => plan.unit), ['/ Tuần', '/ tháng', '/ Năm']);
++  });
++}

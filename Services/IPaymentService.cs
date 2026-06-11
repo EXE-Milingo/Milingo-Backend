@@ -4,6 +4,8 @@ namespace Milingo.Backend.Services;
 
 public interface IPaymentService
 {
+    IReadOnlyList<SubscriptionPlanResponse> GetSubscriptionPlans();
+
     Task<CreatePayOSOrderResponse> CreatePayOSOrderAsync(
         string uid,
         string planId,

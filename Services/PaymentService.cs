@@ -14,6 +14,12 @@ public class PaymentService : IPaymentService
 {
     private const string PayOSPaymentRequestsUrl = "https://api-merchant.payos.vn/v2/payment-requests";
     private const string AndroidPublisherScope = "https://www.googleapis.com/auth/androidpublisher";
+    private static readonly PaymentPlanDefinition[] PaymentPlans =
+    {
+        new("plus", "Plus", "Gói Plus"),
+        new("pro", "Pro", "Gói Pro"),
+        new("ultra", "Ultra", "Gói Ultra")
+    };
 
     private readonly HttpClient _httpClient;
     private readonly IFirestoreService _firestoreService;
@@ -37,6 +43,20 @@ public class PaymentService : IPaymentService
         _configuration = configuration;
         _environment = environment;
         _logger = logger;
+    }
+
+    /// <inheritdoc />
+    public IReadOnlyList<SubscriptionPlanResponse> GetSubscriptionPlans()
+    {
+        return PaymentPlans
+            .Select(plan => new SubscriptionPlanResponse
+            {
+                PlanId = plan.Id,
+                PlanName = plan.DisplayName,
+                Amount = GetConfiguredPlanAmount(plan),
+                DurationDays = GetConfiguredPlanDurationDays(plan)
+            })
+            .ToList();
     }
 
     /// <inheritdoc />
@@ -565,15 +585,7 @@ public class PaymentService : IPaymentService
 
     private int GetPlanAmount(string planId)
     {
-        var sectionName = GetPlanSectionName(planId);
-        var amount = _configuration.GetValue<int?>($"Subscriptions:{sectionName}:Amount");
-
-        if (amount is null or <= 0)
-        {
-            throw new InvalidOperationException($"Subscription plan '{planId}' is not configured.");
-        }
-
-        return amount.Value;
+        return GetConfiguredPlanAmount(GetPaymentPlan(planId));
     }
 
     private int? TryGetConfiguredPlanAmount(string? planId)
@@ -585,7 +597,7 @@ public class PaymentService : IPaymentService
         {
             return GetPlanAmount(planId);
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException)
         {
             return null;
         }
@@ -593,20 +605,41 @@ public class PaymentService : IPaymentService
 
     private DateTime GetPremiumExpiresAt(string planId)
     {
-        var sectionName = GetPlanSectionName(planId);
-        var durationDays = _configuration.GetValue<int?>($"Subscriptions:{sectionName}:DurationDays") ?? 30;
-
+        var durationDays = GetConfiguredPlanDurationDays(GetPaymentPlan(planId));
         return DateTime.UtcNow.AddDays(durationDays);
     }
 
-    private static string GetPlanSectionName(string planId)
+    private PaymentPlanDefinition GetPaymentPlan(string planId)
     {
         var normalizedPlanId = NormalizePlanId(planId);
-        return string.Join(
-            "_",
-            normalizedPlanId
-                .Split(new[] { '_', '-' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(part => CultureInfo.InvariantCulture.TextInfo.ToTitleCase(part)));
+        var plan = PaymentPlans.FirstOrDefault(candidate => candidate.Id == normalizedPlanId);
+
+        return plan ?? throw new ArgumentException(
+            $"Unsupported subscription plan '{planId}'. Supported plans: plus, pro, ultra.",
+            nameof(planId));
+    }
+
+    private int GetConfiguredPlanAmount(PaymentPlanDefinition plan)
+    {
+        var amount = _configuration.GetValue<int?>($"Subscriptions:{plan.SectionName}:Amount");
+        if (amount is null or <= 0)
+        {
+            throw new InvalidOperationException($"Subscription plan '{plan.Id}' is not configured.");
+        }
+
+        return amount.Value;
+    }
+
+    private int GetConfiguredPlanDurationDays(PaymentPlanDefinition plan)
+    {
+        var durationDays = _configuration.GetValue<int?>(
+            $"Subscriptions:{plan.SectionName}:DurationDays");
+        if (durationDays is null or <= 0)
+        {
+            throw new InvalidOperationException($"Subscription plan '{plan.Id}' has no valid duration.");
+        }
+
+        return durationDays.Value;
     }
 
     private static string NormalizePlanId(string planId)
@@ -750,6 +783,9 @@ public class PaymentService : IPaymentService
     {
         return NormalizePlanId(planId ?? string.Empty) switch
         {
+            "plus" => "Gói Plus",
+            "pro" => "Gói Pro",
+            "ultra" => "Gói Ultra",
             "plus_monthly" => "Gói Plus",
             "plus_yearly" => "Gói Plus Năm",
             "pro_monthly" => "Gói Pro",
@@ -895,6 +931,11 @@ public class PaymentService : IPaymentService
         string Uid,
         int Amount,
         DateTime PremiumExpiresAt);
+
+    private sealed record PaymentPlanDefinition(
+        string Id,
+        string SectionName,
+        string DisplayName);
 
     private sealed record PaymentOrderDocument(
         string Id,

@@ -37,6 +37,21 @@ public class CreatePayOSOrderResponse
     public string PaymentLinkId { get; set; } = string.Empty;
 }
 
+public class SubscriptionPlanResponse
+{
+    [JsonPropertyName("planId")]
+    public string PlanId { get; set; } = string.Empty;
+
+    [JsonPropertyName("planName")]
+    public string PlanName { get; set; } = string.Empty;
+
+    [JsonPropertyName("amount")]
+    public int Amount { get; set; }
+
+    [JsonPropertyName("durationDays")]
+    public int DurationDays { get; set; }
+}
+
 public class PayOSWebhookPayload
 {
     [JsonPropertyName("code")]
