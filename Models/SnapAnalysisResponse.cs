@@ -223,4 +223,8 @@ public class SnapAnalysisResponse
     /// </summary>
     [JsonPropertyName("coins_awarded")]
     public int CoinsAwarded { get; set; }
+
+    [JsonPropertyName("quota")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public SnapQuotaStatus? Quota { get; set; }
 }

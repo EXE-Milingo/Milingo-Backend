@@ -16,18 +16,24 @@ public interface IFirestoreService
         string idempotencyKey,
         CancellationToken cancellationToken = default);
 
+    Task<SnapQuotaStatus> GetSnapQuotaStatusAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default);
+
     Task<bool> SaveVocabAndAddCoinsAsync(
         string userId,
         VocabResponse vocab,
         string idempotencyKey,
         CancellationToken cancellationToken = default);
 
-    Task<bool> SaveMultiVocabAndAddCoinsAsync(
+    Task<SnapSaveResult> SaveMultiVocabAndAddCoinsAsync(
         string userId,
         List<SnapVocabItem> vocabItems,
         string idempotencyKey,
         bool usedFallback,
         List<SnapDetectionDetail> detectionDetails,
+        int freeDailyLimit,
         CancellationToken cancellationToken = default);
 
     // =================================================================
@@ -246,7 +252,7 @@ public interface IFirestoreService
         string uid,
         CancellationToken cancellationToken = default);
 
-        // =================================================================
+    // =================================================================
     //  GAMIFICATION
     // =================================================================
 

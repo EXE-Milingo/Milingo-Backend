@@ -16,17 +16,63 @@ public class SnapController : ControllerBase
     private readonly IYoloService _yoloService;
     private readonly IFirestoreService _firestoreService;
     private readonly ILogger<SnapController> _logger;
+    private readonly int _freeDailySnapLimit;
 
     public SnapController(
         IOpenAiService openAiService,
         IYoloService yoloService,
         IFirestoreService firestoreService,
+        IConfiguration configuration,
         ILogger<SnapController> logger)
     {
         _openAiService = openAiService;
         _yoloService = yoloService;
         _firestoreService = firestoreService;
         _logger = logger;
+        _freeDailySnapLimit = Math.Max(
+            0,
+            configuration.GetValue<int?>("Snap:FreeDailyLimit") ?? 3);
+    }
+
+    [HttpGet("quota")]
+    public async Task<IActionResult> GetSnapQuota(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var userId = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token: User identifier not found in claims."
+                });
+            }
+
+            var quota = await _firestoreService.GetSnapQuotaStatusAsync(
+                userId, _freeDailySnapLimit, cancellationToken);
+
+            return Ok(new ApiResponse<SnapQuotaStatus>
+            {
+                Status = "success",
+                Message = "Snap quota retrieved successfully.",
+                Data = quota
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Get snap quota request cancelled: client disconnected.");
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error getting snap quota.");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred while checking snap quota."
+            });
+        }
     }
 
     /// <summary>
@@ -50,6 +96,13 @@ public class SnapController : ControllerBase
                     Status = "error",
                     Message = "Invalid token: User identifier not found in claims."
                 });
+            }
+
+            var quota = await _firestoreService.GetSnapQuotaStatusAsync(
+                userId, _freeDailySnapLimit, cancellationToken);
+            if (quota.IsLimitReached)
+            {
+                return SnapQuotaPaymentRequired(quota);
             }
 
             if (image is null || image.Length == 0)
@@ -210,6 +263,13 @@ public class SnapController : ControllerBase
                 });
             }
 
+            var quota = await _firestoreService.GetSnapQuotaStatusAsync(
+                userId, _freeDailySnapLimit, cancellationToken);
+            if (quota.IsLimitReached)
+            {
+                return SnapQuotaPaymentRequired(quota);
+            }
+
             // --- 4. VALIDATION: Check file presence ---
             if (image is null || image.Length == 0)
             {
@@ -319,14 +379,16 @@ public class SnapController : ControllerBase
             }
 
             // --- 10. PERSISTENCE: Save vocabs, coins, cache response (with idempotency) ---
-            var isNew = await _firestoreService.SaveMultiVocabAndAddCoinsAsync(
+            var saveResult = await _firestoreService.SaveMultiVocabAndAddCoinsAsync(
                 userId, vocabItems, idempotencyKey, usedFallback,
-                detectionDetails, cancellationToken);
+                detectionDetails, _freeDailySnapLimit, cancellationToken);
 
+            var isNew = saveResult.IsNew;
             var coinsAwarded = isNew ? vocabItems.Count * 10 : 0;
 
             // --- 11. RESPONSE (backward compatible) ---
             var responseData = BuildResponse(idempotencyKey, vocabItems, usedFallback, coinsAwarded);
+            responseData.Quota = saveResult.Quota;
 
             var message = isNew
                 ? $"Analyzed {vocabItems.Count} object(s). +{coinsAwarded} coins!"
@@ -342,6 +404,10 @@ public class SnapController : ControllerBase
                 Message = message,
                 Data = responseData
             });
+        }
+        catch (SnapQuotaExceededException ex)
+        {
+            return SnapQuotaPaymentRequired(ex.Quota);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -422,6 +488,13 @@ public class SnapController : ControllerBase
                 });
             }
 
+            var quota = await _firestoreService.GetSnapQuotaStatusAsync(
+                userId, _freeDailySnapLimit, cancellationToken);
+            if (quota.IsLimitReached)
+            {
+                return SnapQuotaPaymentRequired(quota);
+            }
+
             var detections = request?.Objects
                 .Where(o => !string.IsNullOrWhiteSpace(o.CroppedImageBase64))
                 .Take(3)
@@ -450,12 +523,14 @@ public class SnapController : ControllerBase
             }
 
             var detectionDetails = detections.Select(ToSnapDetectionDetail).ToList();
-            var isNew = await _firestoreService.SaveMultiVocabAndAddCoinsAsync(
+            var saveResult = await _firestoreService.SaveMultiVocabAndAddCoinsAsync(
                 userId, vocabItems, idempotencyKey, usedFallback: false,
-                detectionDetails, cancellationToken);
+                detectionDetails, _freeDailySnapLimit, cancellationToken);
 
+            var isNew = saveResult.IsNew;
             var coinsAwarded = isNew ? vocabItems.Count * 10 : 0;
             var responseData = BuildResponse(idempotencyKey, vocabItems, usedFallback: false, coinsAwarded);
+            responseData.Quota = saveResult.Quota;
 
             _logger.LogInformation(
                 "User '{UserId}' confirmed snap complete: {Count} object(s), new={IsNew}.",
@@ -469,6 +544,10 @@ public class SnapController : ControllerBase
                     : "This request was already processed. No duplicate coins awarded.",
                 Data = responseData
             });
+        }
+        catch (SnapQuotaExceededException ex)
+        {
+            return SnapQuotaPaymentRequired(ex.Quota);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -507,6 +586,16 @@ public class SnapController : ControllerBase
     // =================================================================
     //  PRIVATE HELPERS
     // =================================================================
+
+    private IActionResult SnapQuotaPaymentRequired(SnapQuotaStatus quota)
+    {
+        return StatusCode(StatusCodes.Status402PaymentRequired, new ApiResponse<SnapQuotaStatus>
+        {
+            Status = "error",
+            Message = $"Bạn đã dùng hết {quota.DailyLimit} lượt quét miễn phí hôm nay. Hãy nâng cấp để quét không giới hạn.",
+            Data = quota
+        });
+    }
 
     /// <summary>
     /// Builds a <see cref="SnapAnalysisResponse"/> with backward-compatible

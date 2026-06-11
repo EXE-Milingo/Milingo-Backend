@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -96,6 +97,30 @@ public class FirestoreService : IFirestoreService
     }
 
     /// <inheritdoc />
+    public async Task<SnapQuotaStatus> GetSnapQuotaStatusAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(userId);
+        var quotaClock = GetSnapQuotaClock();
+        var usageRef = userRef.Collection("snap_usage").Document(quotaClock.DayKey);
+
+        var userSnapshotTask = userRef.GetSnapshotAsync(cancellationToken);
+        var usageSnapshotTask = usageRef.GetSnapshotAsync(cancellationToken);
+        await Task.WhenAll(userSnapshotTask, usageSnapshotTask);
+
+        var isPremium = IsActivePremium(userSnapshotTask.Result);
+        var usedToday = GetInt(usageSnapshotTask.Result, "count");
+
+        return BuildSnapQuotaStatus(
+            isPremium,
+            freeDailyLimit,
+            usedToday,
+            quotaClock.ResetAtUtc);
+    }
+
+    /// <inheritdoc />
     public async Task<bool> SaveVocabAndAddCoinsAsync(
         string userId,
         VocabResponse vocab,
@@ -169,23 +194,30 @@ public class FirestoreService : IFirestoreService
     }
 
     /// <inheritdoc />
-    public async Task<bool> SaveMultiVocabAndAddCoinsAsync(
+    public async Task<SnapSaveResult> SaveMultiVocabAndAddCoinsAsync(
         string userId,
         List<SnapVocabItem> vocabItems,
         string idempotencyKey,
         bool usedFallback,
         List<SnapDetectionDetail> detectionDetails,
+        int freeDailyLimit,
         CancellationToken cancellationToken = default)
     {
         if (vocabItems.Count == 0)
         {
             _logger.LogWarning("SaveMultiVocabAndAddCoinsAsync called with 0 items for user '{UserId}'.", userId);
-            return false;
+            return new SnapSaveResult
+            {
+                IsNew = false,
+                Quota = BuildSnapQuotaStatus(false, freeDailyLimit, 0, GetSnapQuotaClock().ResetAtUtc)
+            };
         }
 
         var userRef = _db.Collection("users").Document(userId);
         var vocabCollection = userRef.Collection("vocabularies");
         var eventRef = userRef.Collection("snap_events").Document(idempotencyKey);
+        var quotaClock = GetSnapQuotaClock();
+        var usageRef = userRef.Collection("snap_usage").Document(quotaClock.DayKey);
         var coinsToAward = vocabItems.Count * 10;
 
         var fullResponse = new SnapAnalysisResponse
@@ -202,17 +234,38 @@ public class FirestoreService : IFirestoreService
         };
         var cachedResponseJson = JsonSerializer.Serialize(fullResponse);
 
-        var isNewRequest = await _db.RunTransactionAsync(async transaction =>
+        var saveResult = await _db.RunTransactionAsync(async transaction =>
         {
             DocumentSnapshot eventSnapshot = await transaction.GetSnapshotAsync(
                 eventRef, cancellationToken);
+            DocumentSnapshot userSnapshot = await transaction.GetSnapshotAsync(
+                userRef, cancellationToken);
+            DocumentSnapshot usageSnapshot = await transaction.GetSnapshotAsync(
+                usageRef, cancellationToken);
+
+            var isPremium = IsActivePremium(userSnapshot);
+            var usedToday = GetInt(usageSnapshot, "count");
+            var quotaBeforeWrite = BuildSnapQuotaStatus(
+                isPremium,
+                freeDailyLimit,
+                usedToday,
+                quotaClock.ResetAtUtc);
 
             if (eventSnapshot.Exists)
             {
                 _logger.LogInformation(
                     "Duplicate snap event detected for user '{UserId}', key '{Key}'. Skipping.",
                     userId, idempotencyKey);
-                return false;
+                return new SnapSaveResult
+                {
+                    IsNew = false,
+                    Quota = quotaBeforeWrite
+                };
+            }
+
+            if (quotaBeforeWrite.IsLimitReached)
+            {
+                throw new SnapQuotaExceededException(quotaBeforeWrite);
             }
 
             var eventData = new Dictionary<string, object>
@@ -265,8 +318,20 @@ public class FirestoreService : IFirestoreService
             transaction.Set(eventRef, eventData);
 
             transaction.Set(userRef,
-                new Dictionary<string, object> { { "coins", FieldValue.Increment(coinsToAward) } },
+                new Dictionary<string, object>
+                {
+                    { "coins", FieldValue.Increment(coinsToAward) },
+                    { "total_points", FieldValue.Increment(coinsToAward) }
+                },
                 SetOptions.MergeAll);
+
+            transaction.Set(usageRef, new Dictionary<string, object>
+            {
+                { "date_key", quotaClock.DayKey },
+                { "count", FieldValue.Increment(1) },
+                { "reset_at", Timestamp.FromDateTime(quotaClock.ResetAtUtc) },
+                { "updated_at", FieldValue.ServerTimestamp }
+            }, SetOptions.MergeAll);
 
             foreach (var item in vocabItems)
             {
@@ -301,18 +366,26 @@ public class FirestoreService : IFirestoreService
                 transaction.Set(newVocabDoc, vocabData);
             }
 
-            return true;
+            return new SnapSaveResult
+            {
+                IsNew = true,
+                Quota = BuildSnapQuotaStatus(
+                    isPremium,
+                    freeDailyLimit,
+                    usedToday + 1,
+                    quotaClock.ResetAtUtc)
+            };
 
         }, cancellationToken: cancellationToken);
 
-        if (isNewRequest)
+        if (saveResult.IsNew)
         {
             _logger.LogInformation(
                 "Saved {Count} vocabularies and awarded {Coins} coins to user '{UserId}' (key: {Key}).",
                 vocabItems.Count, coinsToAward, userId, idempotencyKey);
         }
 
-        return isNewRequest;
+        return saveResult;
     }
 
     // =================================================================
@@ -1519,6 +1592,61 @@ public class FirestoreService : IFirestoreService
     //  PRIVATE HELPERS
     // =================================================================
 
+    private static SnapQuotaStatus BuildSnapQuotaStatus(
+        bool isPremium,
+        int freeDailyLimit,
+        int usedToday,
+        DateTime resetAtUtc)
+    {
+        var limit = Math.Max(0, freeDailyLimit);
+        var normalizedUsed = Math.Max(0, usedToday);
+        var remaining = isPremium ? limit : Math.Max(0, limit - normalizedUsed);
+
+        return new SnapQuotaStatus
+        {
+            IsPremium = isPremium,
+            DailyLimit = limit,
+            UsedToday = normalizedUsed,
+            RemainingToday = remaining,
+            IsLimitReached = !isPremium && normalizedUsed >= limit,
+            ResetAt = resetAtUtc
+        };
+    }
+
+    private static SnapQuotaClock GetSnapQuotaClock()
+    {
+        var vietnamOffset = TimeSpan.FromHours(7);
+        var nowLocal = DateTimeOffset.UtcNow.ToOffset(vietnamOffset);
+        var nextLocalMidnight = new DateTimeOffset(
+            nowLocal.Date.AddDays(1),
+            vietnamOffset);
+
+        return new SnapQuotaClock(
+            nowLocal.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
+            nextLocalMidnight.UtcDateTime);
+    }
+
+    private static bool IsActivePremium(DocumentSnapshot snapshot)
+    {
+        if (!snapshot.Exists)
+            return false;
+
+        var isPremiumFlag = snapshot.ContainsField("isPremium")
+            && snapshot.GetValue<bool>("isPremium");
+        var expiresAt = GetTimestampUtc(snapshot, "premiumExpiresAt");
+
+        return isPremiumFlag
+            && expiresAt.HasValue
+            && expiresAt.Value > DateTime.UtcNow;
+    }
+
+    private static int GetInt(DocumentSnapshot snapshot, string fieldName)
+    {
+        return snapshot.Exists && snapshot.ContainsField(fieldName)
+            ? snapshot.GetValue<int>(fieldName)
+            : 0;
+    }
+
     private static DateTime? GetTimestampUtc(DocumentSnapshot snapshot, string fieldName)
     {
         if (!snapshot.ContainsField(fieldName))
@@ -1566,6 +1694,8 @@ public class FirestoreService : IFirestoreService
             ? snapshot.GetValue<string?>(fieldName)
             : null;
     }
+
+    private sealed record SnapQuotaClock(string DayKey, DateTime ResetAtUtc);
 
     private static DateTime? ParseIsoUtc(string? value)
     {

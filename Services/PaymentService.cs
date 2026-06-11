@@ -795,7 +795,7 @@ public class PaymentService : IPaymentService
             new()
             {
                 Icon = "scan",
-                Title = isProPlan ? "Lượt quét không giới hạn" : "Quét 100 vật thể mỗi ngày",
+                Title = "Lượt quét không giới hạn",
                 Subtitle = "Phân tích vật thể AI nhanh hơn."
             },
             new()
