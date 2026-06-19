@@ -266,8 +266,7 @@ public class StudyController : ControllerBase
         return studyCards;
     }
 
-    private static string GetSuggestedMode(CardResponse card) =>
-        card.SrsRepetitions <= 0 ? "flashcard" : "mcq";
+    private static string GetSuggestedMode(CardResponse card) => "mcq";
 
     private async Task<List<StudyOption>> BuildMcqOptionsAsync(
         string userId,
