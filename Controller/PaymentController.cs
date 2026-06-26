@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Milingo.Backend.Extensions;
@@ -128,6 +129,69 @@ public class PaymentController : ControllerBase
                 Message = "Webhook received."
             });
         }
+    }
+
+    [HttpGet("payos/redirect")]
+    [AllowAnonymous]
+    public IActionResult PayOSRedirect(
+        [FromQuery] string status,
+        [FromQuery] long orderCode)
+    {
+        var isSuccess = !string.Equals(status, "CANCELLED", StringComparison.OrdinalIgnoreCase);
+        var appPath = isSuccess ? "success" : "cancel";
+        var appUrl = $"milingo://payment/payment/{appPath}?orderCode={orderCode}&status={status}";
+
+        var html = $$"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Redirecting to MiLingo...</title>
+            <script>
+                window.onload = function() {
+                    window.location.href = "{{appUrl}}";
+                    setTimeout(function() {
+                        var fallback = document.getElementById('fallback');
+                        if (fallback) fallback.style.display = 'block';
+                    }, 2500);
+                };
+            </script>
+            <style>
+                body {
+                    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                    text-align: center;
+                    padding: 50px 20px;
+                    background-color: #F7FAF5;
+                    color: #17201B;
+                }
+                h2 { margin-bottom: 10px; color: #0B7A75; }
+                p { color: #66736C; font-size: 16px; }
+                .btn {
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background-color: #0B7A75;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 8px;
+                    font-weight: bold;
+                    margin-top: 20px;
+                    box-shadow: 0 4px 6px rgba(11, 122, 117, 0.2);
+                }
+            </style>
+        </head>
+        <body>
+            <h2>Đang chuyển hướng về ứng dụng MiLingo...</h2>
+            <p>Vui lòng đợi trong giây lát.</p>
+            <div id="fallback" style="display:none;">
+                <p>Nếu ứng dụng không tự động mở, vui lòng nhấn nút bên dưới:</p>
+                <a class="btn" href="{{appUrl}}">Mở ứng dụng MiLingo</a>
+            </div>
+        </body>
+        </html>
+        """;
+
+        return Content(html, "text/html", Encoding.UTF8);
     }
 
     [HttpPost("payos/verify-order/{orderCode}")]
