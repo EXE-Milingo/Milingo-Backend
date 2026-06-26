@@ -317,13 +317,54 @@ public class FirestoreService : IFirestoreService
 
             transaction.Set(eventRef, eventData);
 
-            transaction.Set(userRef,
-                new Dictionary<string, object>
+            // Calculate and update daily streak (local timezone UTC+7)
+            var todayLocal = DateTime.UtcNow.AddHours(7).Date;
+            var yesterdayLocal = todayLocal.AddDays(-1);
+
+            DateTime? lastStudyLocal = null;
+            if (userSnapshot.ContainsField("last_study_date"))
+            {
+                var ts = userSnapshot.GetValue<Timestamp>("last_study_date");
+                lastStudyLocal = ts.ToDateTimeOffset().UtcDateTime.Date;
+            }
+
+            int newStreak = 0;
+            bool shouldUpdateStreak = false;
+
+            if (lastStudyLocal.HasValue && lastStudyLocal.Value == todayLocal)
+            {
+                newStreak = userSnapshot.ContainsField("current_streak")
+                    ? userSnapshot.GetValue<int>("current_streak") : 0;
+            }
+            else
+            {
+                shouldUpdateStreak = true;
+                if (lastStudyLocal.HasValue && lastStudyLocal.Value == yesterdayLocal)
                 {
-                    { "coins", FieldValue.Increment(coinsToAward) },
-                    { "total_points", FieldValue.Increment(coinsToAward) }
-                },
-                SetOptions.MergeAll);
+                    var oldStreak = userSnapshot.ContainsField("current_streak")
+                        ? userSnapshot.GetValue<int>("current_streak") : 0;
+                    newStreak = oldStreak + 1;
+                }
+                else
+                {
+                    newStreak = 1;
+                }
+            }
+
+            var userUpdates = new Dictionary<string, object>
+            {
+                { "coins", FieldValue.Increment(coinsToAward) },
+                { "total_points", FieldValue.Increment(coinsToAward) }
+            };
+
+            if (shouldUpdateStreak)
+            {
+                userUpdates["current_streak"] = newStreak;
+                userUpdates["last_study_date"] = Timestamp.FromDateTime(
+                    DateTime.SpecifyKind(todayLocal, DateTimeKind.Utc));
+            }
+
+            transaction.Set(userRef, userUpdates, SetOptions.MergeAll);
 
             transaction.Set(usageRef, new Dictionary<string, object>
             {
@@ -1807,7 +1848,20 @@ public class FirestoreService : IFirestoreService
         if (snapshot.ContainsField("last_study_date"))
         {
             var ts = snapshot.GetValue<Timestamp>("last_study_date");
+            var lastStudyLocal = ts.ToDateTimeOffset().UtcDateTime.Date;
             lastStudyDate = ts.ToDateTimeOffset().ToString("o");
+
+            // Daily streak expires if the user didn't study yesterday or today
+            var todayLocal = DateTime.UtcNow.AddHours(7).Date;
+            var yesterdayLocal = todayLocal.AddDays(-1);
+            if (lastStudyLocal < yesterdayLocal && lastStudyLocal != todayLocal)
+            {
+                streak = 0;
+            }
+        }
+        else
+        {
+            streak = 0;
         }
 
         return new UserStatsResponse
@@ -1826,8 +1880,8 @@ public class FirestoreService : IFirestoreService
     {
         var userRef = _db.Collection("users").Document(userId);
 
-        // Ngày hôm nay (UTC, chỉ lấy date part)
-        var todayUtc = DateTime.UtcNow.Date;
+        // Ngày hôm nay (UTC+7 Vietnam)
+        var todayLocal = DateTime.UtcNow.AddHours(7).Date;
 
         var updatedStats = await _db.RunTransactionAsync(async transaction =>
         {
@@ -1846,15 +1900,15 @@ public class FirestoreService : IFirestoreService
                 ? snapshot.GetValue<int>("total_points") : coins;
 
             // Lấy last_study_date
-            DateTime? lastStudyUtc = null;
+            DateTime? lastStudyLocal = null;
             if (snapshot.ContainsField("last_study_date"))
             {
                 var ts = snapshot.GetValue<Timestamp>("last_study_date");
-                lastStudyUtc = ts.ToDateTimeOffset().UtcDateTime.Date;
+                lastStudyLocal = ts.ToDateTimeOffset().UtcDateTime.Date;
             }
 
             // Idempotent: hôm nay đã ghi nhận rồi → không thay đổi gì
-            if (lastStudyUtc.HasValue && lastStudyUtc.Value == todayUtc)
+            if (lastStudyLocal.HasValue && lastStudyLocal.Value == todayLocal)
             {
                 _logger.LogInformation(
                     "RecordFlashcardStudy: user '{UserId}' already studied today. No change.",
@@ -1868,15 +1922,15 @@ public class FirestoreService : IFirestoreService
                     Coins = coins,
                     CurrentStreak = currentStreak,
                     TotalPoints = totalPoints,
-                    LastStudyDate = todayUtc.ToString("o"),
+                    LastStudyDate = todayLocal.ToString("o"),
                 };
             }
 
             // Tính streak mới
             int newStreak;
-            var yesterdayUtc = todayUtc.AddDays(-1);
+            var yesterdayLocal = todayLocal.AddDays(-1);
 
-            if (lastStudyUtc.HasValue && lastStudyUtc.Value == yesterdayUtc)
+            if (lastStudyLocal.HasValue && lastStudyLocal.Value == yesterdayLocal)
             {
                 // Học liên tiếp → tăng streak
                 var oldStreak = snapshot.ContainsField("current_streak")
@@ -1894,7 +1948,7 @@ public class FirestoreService : IFirestoreService
             {
                 { "current_streak", newStreak },
                 { "last_study_date", Timestamp.FromDateTime(
-                    DateTime.SpecifyKind(todayUtc, DateTimeKind.Utc)) },
+                    DateTime.SpecifyKind(todayLocal, DateTimeKind.Utc)) },
             });
 
             _logger.LogInformation(
@@ -1906,7 +1960,7 @@ public class FirestoreService : IFirestoreService
                 Coins = coins,
                 CurrentStreak = newStreak,
                 TotalPoints = totalPoints,
-                LastStudyDate = todayUtc.ToString("o"),
+                LastStudyDate = todayLocal.ToString("o"),
             };
 
         }, cancellationToken: cancellationToken);
