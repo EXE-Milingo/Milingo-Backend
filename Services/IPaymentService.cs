@@ -18,6 +18,14 @@ public interface IPaymentService
         string signature,
         CancellationToken cancellationToken = default);
 
+    Task<bool> VerifyPayOSOrderAsync(
+        long orderCode,
+        CancellationToken cancellationToken = default);
+
+    Task SyncPendingPayOSOrdersAsync(
+        string uid,
+        CancellationToken cancellationToken = default);
+
     Task<VerifyGooglePurchaseResponse> VerifyGooglePurchaseAsync(
         string uid,
         string purchaseToken,

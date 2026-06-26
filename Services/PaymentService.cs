@@ -207,6 +207,126 @@ public class PaymentService : IPaymentService
     }
 
     /// <inheritdoc />
+    public async Task<bool> VerifyPayOSOrderAsync(
+        long orderCode,
+        CancellationToken cancellationToken = default)
+    {
+        var clientId = GetRequiredConfig("PayOS:ClientId");
+        var apiKey = GetRequiredConfig("PayOS:ApiKey");
+
+        var orderRef = _db.Collection("payment_orders")
+            .Document(orderCode.ToString(CultureInfo.InvariantCulture));
+        var snapshot = await orderRef.GetSnapshotAsync(cancellationToken);
+        if (!snapshot.Exists)
+        {
+            _logger.LogWarning("Verification failed: Order {OrderCode} not found in Firestore.", orderCode);
+            return false;
+        }
+
+        var currentStatus = snapshot.ContainsField("status") ? snapshot.GetValue<string>("status") : "PENDING";
+        if (IsPaidStatus(currentStatus))
+        {
+            return true;
+        }
+
+        var url = $"{PayOSPaymentRequestsUrl}/{orderCode}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add("x-client-id", clientId);
+        request.Headers.Add("x-api-key", apiKey);
+
+        _logger.LogInformation("Querying PayOS order status for {OrderCode} directly from API.", orderCode);
+
+        try
+        {
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                var body = await response.Content.ReadAsStringAsync(cancellationToken);
+                _logger.LogWarning("PayOS query order failed. HTTP {StatusCode}: {Body}", (int)response.StatusCode, body);
+                return false;
+            }
+
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            var payload = JsonSerializer.Deserialize<PayOSWebhookPayload>(responseBody, _jsonOptions);
+            if (payload == null || !string.Equals(payload.Code, "00", StringComparison.OrdinalIgnoreCase) || payload.Data == null)
+            {
+                _logger.LogWarning("PayOS query order returned invalid or error payload: {Body}", responseBody);
+                return false;
+            }
+
+            var payosStatus = payload.Data.Status;
+            if (string.Equals(payosStatus, "PAID", StringComparison.OrdinalIgnoreCase))
+            {
+                var uid = snapshot.GetValue<string>("uid");
+                var expiresAtUtc = snapshot.ContainsField("premiumExpiresAt")
+                    ? snapshot.GetValue<Timestamp>("premiumExpiresAt").ToDateTime()
+                    : GetPremiumExpiresAt(snapshot.ContainsField("planId") ? snapshot.GetValue<string>("planId") : "monthly");
+
+                await _firestoreService.SetPremiumAsync(
+                    uid,
+                    expiresAtUtc,
+                    "payos",
+                    cancellationToken);
+
+                await MarkPayOSOrderStatusAsync(orderCode, "PAID", cancellationToken);
+
+                _logger.LogInformation(
+                    "Direct verification: PayOS order {OrderCode} confirmed PAID. Premium granted to user '{Uid}'.",
+                    orderCode, uid);
+                return true;
+            }
+            else if (string.Equals(payosStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(payosStatus, "EXPIRED", StringComparison.OrdinalIgnoreCase))
+            {
+                await MarkPayOSOrderStatusAsync(orderCode, payosStatus.ToUpperInvariant(), cancellationToken);
+                _logger.LogInformation("Direct verification: PayOS order {OrderCode} is {Status}.", orderCode, payosStatus);
+            }
+            else
+            {
+                _logger.LogInformation("Direct verification: PayOS order {OrderCode} is still {Status}.", orderCode, payosStatus);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error querying PayOS status for order {OrderCode}.", orderCode);
+        }
+
+        return false;
+    }
+
+    /// <inheritdoc />
+    public async Task SyncPendingPayOSOrdersAsync(
+        string uid,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var orders = await GetUserPaymentOrdersAsync(uid, cancellationToken);
+            var pendingPayOSOrders = orders
+                .Where(o => string.Equals(o.Source, "payos", StringComparison.OrdinalIgnoreCase)
+                            && string.Equals(o.Status, "PENDING", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (pendingPayOSOrders.Count == 0)
+                return;
+
+            _logger.LogInformation("Found {Count} pending PayOS orders for user '{Uid}'. Syncing status...", pendingPayOSOrders.Count, uid);
+
+            foreach (var order in pendingPayOSOrders)
+            {
+                if (order.OrderCode.HasValue)
+                {
+                    await VerifyPayOSOrderAsync(order.OrderCode.Value, cancellationToken);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error syncing pending PayOS orders for user '{Uid}'.", uid);
+        }
+    }
+
+    /// <inheritdoc />
     public async Task<VerifyGooglePurchaseResponse> VerifyGooglePurchaseAsync(
         string uid,
         string purchaseToken,

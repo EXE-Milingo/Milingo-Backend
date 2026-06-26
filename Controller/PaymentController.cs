@@ -130,6 +130,33 @@ public class PaymentController : ControllerBase
         }
     }
 
+    [HttpPost("payos/verify-order/{orderCode}")]
+    public async Task<IActionResult> VerifyOrder(
+        long orderCode,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uid = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(uid))
+                return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
+
+            var verified = await _paymentService.VerifyPayOSOrderAsync(orderCode, cancellationToken);
+
+            return Ok(new ApiResponse<object>
+            {
+                Status = verified ? "success" : "error",
+                Message = verified ? "Order verified and paid." : "Order is not paid or verification failed."
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error verifying PayOS order {OrderCode}.", orderCode);
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                ErrorResponse("An unexpected error occurred. Please try again."));
+        }
+    }
+
     [HttpPost("google/verify-purchase")]
     public async Task<IActionResult> VerifyGooglePurchase(
         [FromBody] VerifyGooglePurchaseRequest request,
@@ -181,6 +208,9 @@ public class PaymentController : ControllerBase
             var uid = User.GetFirebaseUid();
             if (string.IsNullOrEmpty(uid))
                 return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
+
+            // Auto-sync any pending PayOS orders
+            await _paymentService.SyncPendingPayOSOrdersAsync(uid, cancellationToken);
 
             var result = await _firestoreService.GetPremiumStatusAsync(uid, cancellationToken);
 
