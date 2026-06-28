@@ -280,4 +280,14 @@ public interface IFirestoreService
     Task<UserStatsResponse> RecordFlashcardStudyAsync(
         string userId,
         CancellationToken cancellationToken = default);
+
+    // =================================================================
+    //  RANKING / LEADERBOARD
+    // =================================================================
+
+    Task<LeaderboardResponse> GetLeaderboardAsync(
+        string userId,
+        int limit,
+        int offset,
+        CancellationToken cancellationToken = default);
 }

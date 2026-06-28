@@ -449,6 +449,7 @@ public class FirestoreService : IFirestoreService
             { "display_name", displayName },
             { "target_language", targetLanguage },
             { "coins", 50 },
+            { "total_points", 50 },
             { "current_streak", 0 },
             { "created_at", FieldValue.ServerTimestamp }
         };
@@ -2029,5 +2030,70 @@ public class FirestoreService : IFirestoreService
         }, cancellationToken: cancellationToken);
 
         return updatedStats;
+    }
+
+    public async Task<LeaderboardResponse> GetLeaderboardAsync(
+        string userId,
+        int limit,
+        int offset,
+        CancellationToken cancellationToken = default)
+    {
+        var usersCollection = _db.Collection("users");
+        var snapshot = await usersCollection.GetSnapshotAsync(cancellationToken);
+
+        var allUsers = snapshot.Documents
+            .Select(doc =>
+            {
+                var id = doc.Id;
+                var displayName = doc.ContainsField("display_name")
+                    ? doc.GetValue<string>("display_name")
+                    : (doc.ContainsField("displayName") ? doc.GetValue<string>("displayName") : null);
+                if (string.IsNullOrWhiteSpace(displayName) && doc.ContainsField("email"))
+                {
+                    var email = doc.GetValue<string>("email");
+                    if (!string.IsNullOrWhiteSpace(email))
+                    {
+                        displayName = email.Split('@')[0];
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(displayName))
+                {
+                    displayName = "Milingo User";
+                }
+                var photoUrl = doc.ContainsField("photo_url")
+                    ? doc.GetValue<string?>("photo_url")
+                    : null;
+                var coins = doc.ContainsField("coins")
+                    ? doc.GetValue<int>("coins")
+                    : 0;
+                var totalPoints = doc.ContainsField("total_points")
+                    ? doc.GetValue<int>("total_points")
+                    : coins;
+
+                return new LeaderboardUser
+                {
+                    Id = id,
+                    DisplayName = displayName,
+                    PhotoUrl = photoUrl,
+                    TotalPoints = totalPoints
+                };
+            })
+            .OrderByDescending(u => u.TotalPoints)
+            .ToList();
+
+        // Assign ranks (1-based)
+        for (int i = 0; i < allUsers.Count; i++)
+        {
+            allUsers[i].Rank = i + 1;
+        }
+
+        var paginatedUsers = allUsers.Skip(offset).Take(limit).ToList();
+        var currentUser = allUsers.FirstOrDefault(u => u.Id == userId);
+
+        return new LeaderboardResponse
+        {
+            Users = paginatedUsers,
+            CurrentUser = currentUser
+        };
     }
 }
