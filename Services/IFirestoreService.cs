@@ -177,6 +177,11 @@ public interface IFirestoreService
         string userId,
         string deckId,
         int limit = 20,
+        string? targetLanguageCode = null,
+        CancellationToken cancellationToken = default);
+
+    Task FixIncorrectCardsNextReviewTimeAsync(
+        string userId,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -186,6 +191,7 @@ public interface IFirestoreService
     Task<List<CardResponse>> GetAllDueCardsAsync(
         string userId,
         int limit = 30,
+        string? targetLanguageCode = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

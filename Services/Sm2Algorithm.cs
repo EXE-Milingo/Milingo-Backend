@@ -23,7 +23,7 @@ public static class Sm2Algorithm
         if (quality < 3)
         {
             newRepetitions = 0;
-            newInterval = 1;
+            newInterval = 0;
         }
         else
         {

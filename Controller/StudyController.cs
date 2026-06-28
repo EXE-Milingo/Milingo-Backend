@@ -30,6 +30,7 @@ public class StudyController : ControllerBase
     public async Task<IActionResult> GetStudySession(
         [FromQuery] string? deckId,
         [FromQuery] int limit = 20,
+        [FromQuery] string? targetLanguage = null,
         CancellationToken cancellationToken = default)
     {
         var userId = User.GetFirebaseUid();
@@ -43,9 +44,23 @@ public class StudyController : ControllerBase
             var allDecks = string.IsNullOrWhiteSpace(deckId)
                 || string.Equals(deckId, "all", StringComparison.OrdinalIgnoreCase);
             var requestedDeckId = deckId?.Trim() ?? string.Empty;
+
+            string? targetLang = targetLanguage;
+            if (string.IsNullOrWhiteSpace(targetLang))
+            {
+                var profile = await _firestoreService.GetUserProfileAsync(userId, cancellationToken);
+                targetLang = profile?.TargetLanguage;
+            }
+
+            var normalizedLang = string.IsNullOrWhiteSpace(targetLang)
+                ? null
+                : SupportedLanguages.NormalizeLanguageCode(targetLang);
+
+            await _firestoreService.FixIncorrectCardsNextReviewTimeAsync(userId, cancellationToken);
+
             var dueCards = allDecks
-                ? await _firestoreService.GetAllDueCardsAsync(userId, limit, cancellationToken)
-                : await _firestoreService.GetDueCardsAsync(userId, requestedDeckId, limit, cancellationToken);
+                ? await _firestoreService.GetAllDueCardsAsync(userId, limit, normalizedLang, cancellationToken)
+                : await _firestoreService.GetDueCardsAsync(userId, requestedDeckId, limit, normalizedLang, cancellationToken);
 
             if (dueCards.Count == 0)
             {
@@ -98,9 +113,10 @@ public class StudyController : ControllerBase
     [HttpGet("daily-session")]
     public async Task<IActionResult> GetDailySession(
         [FromQuery] int limit = 30,
+        [FromQuery] string? targetLanguage = null,
         CancellationToken cancellationToken = default)
     {
-        return await GetStudySession("all", limit, cancellationToken);
+        return await GetStudySession("all", limit, targetLanguage, cancellationToken);
     }
 
     [HttpPost("answer")]

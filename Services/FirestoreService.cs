@@ -1054,6 +1054,7 @@ public class FirestoreService : IFirestoreService
         string userId,
         string deckId,
         int limit = 20,
+        string? targetLanguageCode = null,
         CancellationToken cancellationToken = default)
     {
         limit = Math.Clamp(limit, 1, 50);
@@ -1074,13 +1075,59 @@ public class FirestoreService : IFirestoreService
             deckId,
             deckName,
             limit,
+            targetLanguageCode,
             cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task FixIncorrectCardsNextReviewTimeAsync(
+        string userId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var decksSnapshot = await _db.Collection("users").Document(userId)
+                .Collection("flashcard_decks")
+                .GetSnapshotAsync(cancellationToken);
+
+            var tasks = decksSnapshot.Documents.Select(async deckDoc =>
+            {
+                var cardsSnapshot = await deckDoc.Reference.Collection("cards")
+                    .WhereEqualTo("srs_state", "learning")
+                    .WhereEqualTo("srs_repetitions", 0)
+                    .GetSnapshotAsync(cancellationToken);
+
+                foreach (var cardDoc in cardsSnapshot.Documents)
+                {
+                    if (cardDoc.ContainsField("srs_next_review_at"))
+                    {
+                        var nextReview = cardDoc.GetValue<Timestamp>("srs_next_review_at").ToDateTime();
+                        if (nextReview > DateTime.UtcNow)
+                        {
+                            await cardDoc.Reference.UpdateAsync("srs_next_review_at", Timestamp.FromDateTime(DateTime.UtcNow));
+                            _logger.LogInformation(
+                                "[DIAG] Auto-corrected next review time to now for card {CardId} ({Term}) in deck {DeckId} because it was incorrectly scheduled.",
+                                cardDoc.Id,
+                                cardDoc.ContainsField("term") ? cardDoc.GetValue<string>("term") : string.Empty,
+                                deckDoc.Id);
+                        }
+                    }
+                }
+            });
+
+            await Task.WhenAll(tasks);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to auto-correct incorrect review times for user {UserId}", userId);
+        }
     }
 
     /// <inheritdoc />
     public async Task<List<CardResponse>> GetAllDueCardsAsync(
         string userId,
         int limit = 30,
+        string? targetLanguageCode = null,
         CancellationToken cancellationToken = default)
     {
         limit = Math.Clamp(limit, 1, 50);
@@ -1103,6 +1150,7 @@ public class FirestoreService : IFirestoreService
                 deckDoc.Id,
                 deckName,
                 limit,
+                targetLanguageCode,
                 cancellationToken);
         });
 
@@ -1123,16 +1171,19 @@ public class FirestoreService : IFirestoreService
         string deckId,
         string deckName,
         int limit,
+        string? targetLanguageCode,
         CancellationToken cancellationToken)
     {
         var cardsRef = deckRef.Collection("cards");
         var now = Timestamp.FromDateTime(DateTime.UtcNow);
         var result = new List<CardResponse>();
         var seenIds = new HashSet<string>();
+        var targetLangFilter = targetLanguageCode?.Trim().ToLowerInvariant();
+        int fetchLimit = string.IsNullOrEmpty(targetLangFilter) ? limit : limit * 5;
 
         var brandNewSnapshot = await cardsRef
             .OrderByDescending("created_at")
-            .Limit(limit * 3)
+            .Limit(fetchLimit * 3)
             .GetSnapshotAsync(cancellationToken);
 
         foreach (var doc in brandNewSnapshot.Documents)
@@ -1142,7 +1193,11 @@ public class FirestoreService : IFirestoreService
 
             if (!doc.ContainsField("srs_state") && seenIds.Add(doc.Id))
             {
-                result.Add(MapToCardResponse(doc, deckId, deckName));
+                var card = MapToCardResponse(doc, deckId, deckName);
+                if (string.IsNullOrEmpty(targetLangFilter) || string.Equals(card.TargetLangCode, targetLangFilter, StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Add(card);
+                }
             }
         }
 
@@ -1150,7 +1205,7 @@ public class FirestoreService : IFirestoreService
         {
             var newStateSnapshot = await cardsRef
                 .WhereEqualTo("srs_state", "new")
-                .Limit(limit)
+                .Limit(fetchLimit)
                 .GetSnapshotAsync(cancellationToken);
 
             foreach (var doc in newStateSnapshot.Documents)
@@ -1160,7 +1215,11 @@ public class FirestoreService : IFirestoreService
 
                 if (seenIds.Add(doc.Id))
                 {
-                    result.Add(MapToCardResponse(doc, deckId, deckName));
+                    var card = MapToCardResponse(doc, deckId, deckName);
+                    if (string.IsNullOrEmpty(targetLangFilter) || string.Equals(card.TargetLangCode, targetLangFilter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Add(card);
+                    }
                 }
             }
         }
@@ -1170,7 +1229,7 @@ public class FirestoreService : IFirestoreService
             var dueSnapshot = await cardsRef
                 .WhereLessThanOrEqualTo("srs_next_review_at", now)
                 .OrderBy("srs_next_review_at")
-                .Limit(limit)
+                .Limit(fetchLimit)
                 .GetSnapshotAsync(cancellationToken);
 
             foreach (var doc in dueSnapshot.Documents)
@@ -1180,7 +1239,11 @@ public class FirestoreService : IFirestoreService
 
                 if (seenIds.Add(doc.Id))
                 {
-                    result.Add(MapToCardResponse(doc, deckId, deckName));
+                    var card = MapToCardResponse(doc, deckId, deckName);
+                    if (string.IsNullOrEmpty(targetLangFilter) || string.Equals(card.TargetLangCode, targetLangFilter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Add(card);
+                    }
                 }
             }
         }
