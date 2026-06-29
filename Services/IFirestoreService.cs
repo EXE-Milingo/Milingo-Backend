@@ -37,6 +37,30 @@ public interface IFirestoreService
         CancellationToken cancellationToken = default);
 
     // =================================================================
+    //  AI TUTOR CHAT QUOTA
+    // =================================================================
+
+    /// <summary>
+    /// Returns the current daily chat quota status for a user.
+    /// Premium users bypass the limit.
+    /// </summary>
+    Task<ChatQuotaInfo> GetChatQuotaStatusAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically increments the user's daily chat usage counter.
+    /// Returns the updated quota status after the increment.
+    /// </summary>
+    Task<ChatQuotaInfo> IncrementChatUsageAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default);
+
+
+
+    // =================================================================
     //  USER PROFILE
     // =================================================================
 

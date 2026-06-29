@@ -120,6 +120,64 @@ public class FirestoreService : IFirestoreService
             quotaClock.ResetAtUtc);
     }
 
+    // =================================================================
+    //  AI TUTOR CHAT QUOTA
+    // =================================================================
+
+    /// <inheritdoc />
+    public async Task<ChatQuotaInfo> GetChatQuotaStatusAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(userId);
+        var dayKey = GetVietnamDayKey();
+        var usageRef = userRef.Collection("chat_usage").Document(dayKey);
+
+        var userSnapshotTask = userRef.GetSnapshotAsync(cancellationToken);
+        var usageSnapshotTask = usageRef.GetSnapshotAsync(cancellationToken);
+        await Task.WhenAll(userSnapshotTask, usageSnapshotTask);
+
+        var isPremium = IsActivePremium(userSnapshotTask.Result);
+        var usedToday = GetInt(usageSnapshotTask.Result, "count");
+
+        return BuildChatQuotaInfo(isPremium, freeDailyLimit, usedToday);
+    }
+
+    /// <inheritdoc />
+    public async Task<ChatQuotaInfo> IncrementChatUsageAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(userId);
+        var dayKey = GetVietnamDayKey();
+        var usageRef = userRef.Collection("chat_usage").Document(dayKey);
+
+        // Read premium status and current usage in parallel
+        var userSnapshotTask = userRef.GetSnapshotAsync(cancellationToken);
+        var usageSnapshotTask = usageRef.GetSnapshotAsync(cancellationToken);
+        await Task.WhenAll(userSnapshotTask, usageSnapshotTask);
+
+        var isPremium = IsActivePremium(userSnapshotTask.Result);
+        var usedBefore = GetInt(usageSnapshotTask.Result, "count");
+
+        // Premium users bypass quota — still track for analytics but don't block
+        var newCount = usedBefore + 1;
+
+        // Atomically increment (merge so the document is created on first use)
+        await usageRef.SetAsync(
+            new Dictionary<string, object>
+            {
+                { "count", FieldValue.Increment(1) },
+                { "updated_at", FieldValue.ServerTimestamp },
+            },
+            SetOptions.MergeAll,
+            cancellationToken);
+
+        return BuildChatQuotaInfo(isPremium, freeDailyLimit, newCount);
+    }
+
     /// <inheritdoc />
     public async Task<bool> SaveVocabAndAddCoinsAsync(
         string userId,
@@ -1729,6 +1787,29 @@ public class FirestoreService : IFirestoreService
         return new SnapQuotaClock(
             nowLocal.ToString("yyyyMMdd", CultureInfo.InvariantCulture),
             nextLocalMidnight.UtcDateTime);
+    }
+
+    private static string GetVietnamDayKey()
+    {
+        var vietnamOffset = TimeSpan.FromHours(7);
+        var nowLocal = DateTimeOffset.UtcNow.ToOffset(vietnamOffset);
+        return nowLocal.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+    }
+
+    private static ChatQuotaInfo BuildChatQuotaInfo(bool isPremium, int freeDailyLimit, int usedToday)
+    {
+        var limit = Math.Max(0, freeDailyLimit);
+        var normalizedUsed = Math.Max(0, usedToday);
+        var remaining = isPremium ? int.MaxValue : Math.Max(0, limit - normalizedUsed);
+
+        return new ChatQuotaInfo
+        {
+            IsPremium = isPremium,
+            FreeLimit = limit,
+            UsedToday = normalizedUsed,
+            RemainingToday = isPremium ? int.MaxValue : remaining,
+            IsLimitReached = !isPremium && normalizedUsed >= limit,
+        };
     }
 
     private static bool IsActivePremium(DocumentSnapshot snapshot)
