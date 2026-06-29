@@ -74,13 +74,30 @@ public sealed class ChatService : IChatService
         var messages = BuildMessages(message, history, targetLanguage, cefrLevel);
 
         // 3. Call OpenAI
-        var requestBody = new
+        var isReasoningModel = _model.Contains("o1", StringComparison.OrdinalIgnoreCase) || 
+                               _model.Contains("o3", StringComparison.OrdinalIgnoreCase) ||
+                               _model.Contains("gpt-5", StringComparison.OrdinalIgnoreCase);
+
+        object requestBody;
+        if (isReasoningModel)
         {
-            model = _model,
-            messages,
-            max_tokens = MaxOutputTokens,
-            temperature = Temperature,
-        };
+            requestBody = new
+            {
+                model = _model,
+                messages,
+                max_completion_tokens = MaxOutputTokens
+            };
+        }
+        else
+        {
+            requestBody = new
+            {
+                model = _model,
+                messages,
+                max_completion_tokens = MaxOutputTokens,
+                temperature = Temperature
+            };
+        }
 
         using var request = new HttpRequestMessage(HttpMethod.Post, ChatCompletionsUrl)
         {
