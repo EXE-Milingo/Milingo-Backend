@@ -112,6 +112,15 @@ builder.Services.AddHttpClient<IPaymentService, PaymentService>(client =>
         new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 });
 
+// ChatService: AI Tutor conversational chat (scoped, one per request)
+builder.Services.AddHttpClient<IChatService, ChatService>(client =>
+{
+    var timeoutSeconds = builder.Configuration.GetValue<int>("OpenAI:TimeoutSeconds", 30);
+    client.Timeout = TimeSpan.FromSeconds(timeoutSeconds);
+    client.DefaultRequestHeaders.Accept.Add(
+        new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+});
+
 // ══════════════════════════════════════════════════════════════════
 //  5. API FRAMEWORK — Controllers, OpenAPI, CORS
 // ══════════════════════════════════════════════════════════════════

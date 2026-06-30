@@ -296,4 +296,44 @@ public class UserController : ControllerBase
             });
         }
     }
+
+    [HttpGet("leaderboard")]
+    public async Task<IActionResult> GetLeaderboard(
+        [FromQuery] int limit = 5,
+        [FromQuery] int offset = 0,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var uid = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(uid))
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token."
+                });
+
+            var result = await _firestoreService.GetLeaderboardAsync(uid, limit, offset, cancellationToken);
+
+            return Ok(new ApiResponse<LeaderboardResponse>
+            {
+                Status = "success",
+                Message = "Leaderboard retrieved successfully.",
+                Data = result
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error getting leaderboard.");
+            return StatusCode(500, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred."
+            });
+        }
+    }
 }

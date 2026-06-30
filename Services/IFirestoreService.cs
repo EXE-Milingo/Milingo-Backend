@@ -37,6 +37,30 @@ public interface IFirestoreService
         CancellationToken cancellationToken = default);
 
     // =================================================================
+    //  AI TUTOR CHAT QUOTA
+    // =================================================================
+
+    /// <summary>
+    /// Returns the current daily chat quota status for a user.
+    /// Premium users bypass the limit.
+    /// </summary>
+    Task<ChatQuotaInfo> GetChatQuotaStatusAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Atomically increments the user's daily chat usage counter.
+    /// Returns the updated quota status after the increment.
+    /// </summary>
+    Task<ChatQuotaInfo> IncrementChatUsageAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default);
+
+
+
+    // =================================================================
     //  USER PROFILE
     // =================================================================
 
@@ -177,6 +201,11 @@ public interface IFirestoreService
         string userId,
         string deckId,
         int limit = 20,
+        string? targetLanguageCode = null,
+        CancellationToken cancellationToken = default);
+
+    Task FixIncorrectCardsNextReviewTimeAsync(
+        string userId,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -186,6 +215,7 @@ public interface IFirestoreService
     Task<List<CardResponse>> GetAllDueCardsAsync(
         string userId,
         int limit = 30,
+        string? targetLanguageCode = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -273,5 +303,15 @@ public interface IFirestoreService
     /// </summary>
     Task<UserStatsResponse> RecordFlashcardStudyAsync(
         string userId,
+        CancellationToken cancellationToken = default);
+
+    // =================================================================
+    //  RANKING / LEADERBOARD
+    // =================================================================
+
+    Task<LeaderboardResponse> GetLeaderboardAsync(
+        string userId,
+        int limit,
+        int offset,
         CancellationToken cancellationToken = default);
 }

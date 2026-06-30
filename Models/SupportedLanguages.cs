@@ -45,6 +45,19 @@ public static class SupportedLanguages
                 language,
                 StringComparison.OrdinalIgnoreCase));
     }
+
+    public static string NormalizeLanguageCode(string? input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return string.Empty;
+
+        var cleanInput = input.Trim().Split('-', '_')[0];
+        var details = Details.FirstOrDefault(d =>
+            string.Equals(d.Code, cleanInput, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(d.Name, cleanInput, StringComparison.OrdinalIgnoreCase));
+
+        return details?.Code.ToLowerInvariant() ?? cleanInput.ToLowerInvariant();
+    }
 }
 
 /// <summary>

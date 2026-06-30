@@ -120,6 +120,64 @@ public class FirestoreService : IFirestoreService
             quotaClock.ResetAtUtc);
     }
 
+    // =================================================================
+    //  AI TUTOR CHAT QUOTA
+    // =================================================================
+
+    /// <inheritdoc />
+    public async Task<ChatQuotaInfo> GetChatQuotaStatusAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(userId);
+        var dayKey = GetVietnamDayKey();
+        var usageRef = userRef.Collection("chat_usage").Document(dayKey);
+
+        var userSnapshotTask = userRef.GetSnapshotAsync(cancellationToken);
+        var usageSnapshotTask = usageRef.GetSnapshotAsync(cancellationToken);
+        await Task.WhenAll(userSnapshotTask, usageSnapshotTask);
+
+        var isPremium = IsActivePremium(userSnapshotTask.Result);
+        var usedToday = GetInt(usageSnapshotTask.Result, "count");
+
+        return BuildChatQuotaInfo(isPremium, freeDailyLimit, usedToday);
+    }
+
+    /// <inheritdoc />
+    public async Task<ChatQuotaInfo> IncrementChatUsageAsync(
+        string userId,
+        int freeDailyLimit,
+        CancellationToken cancellationToken = default)
+    {
+        var userRef = _db.Collection("users").Document(userId);
+        var dayKey = GetVietnamDayKey();
+        var usageRef = userRef.Collection("chat_usage").Document(dayKey);
+
+        // Read premium status and current usage in parallel
+        var userSnapshotTask = userRef.GetSnapshotAsync(cancellationToken);
+        var usageSnapshotTask = usageRef.GetSnapshotAsync(cancellationToken);
+        await Task.WhenAll(userSnapshotTask, usageSnapshotTask);
+
+        var isPremium = IsActivePremium(userSnapshotTask.Result);
+        var usedBefore = GetInt(usageSnapshotTask.Result, "count");
+
+        // Premium users bypass quota — still track for analytics but don't block
+        var newCount = usedBefore + 1;
+
+        // Atomically increment (merge so the document is created on first use)
+        await usageRef.SetAsync(
+            new Dictionary<string, object>
+            {
+                { "count", FieldValue.Increment(1) },
+                { "updated_at", FieldValue.ServerTimestamp },
+            },
+            SetOptions.MergeAll,
+            cancellationToken);
+
+        return BuildChatQuotaInfo(isPremium, freeDailyLimit, newCount);
+    }
+
     /// <inheritdoc />
     public async Task<bool> SaveVocabAndAddCoinsAsync(
         string userId,
@@ -449,6 +507,7 @@ public class FirestoreService : IFirestoreService
             { "display_name", displayName },
             { "target_language", targetLanguage },
             { "coins", 50 },
+            { "total_points", 50 },
             { "current_streak", 0 },
             { "created_at", FieldValue.ServerTimestamp }
         };
@@ -1054,6 +1113,7 @@ public class FirestoreService : IFirestoreService
         string userId,
         string deckId,
         int limit = 20,
+        string? targetLanguageCode = null,
         CancellationToken cancellationToken = default)
     {
         limit = Math.Clamp(limit, 1, 50);
@@ -1074,13 +1134,59 @@ public class FirestoreService : IFirestoreService
             deckId,
             deckName,
             limit,
+            targetLanguageCode,
             cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task FixIncorrectCardsNextReviewTimeAsync(
+        string userId,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var decksSnapshot = await _db.Collection("users").Document(userId)
+                .Collection("flashcard_decks")
+                .GetSnapshotAsync(cancellationToken);
+
+            var tasks = decksSnapshot.Documents.Select(async deckDoc =>
+            {
+                var cardsSnapshot = await deckDoc.Reference.Collection("cards")
+                    .WhereEqualTo("srs_state", "learning")
+                    .WhereEqualTo("srs_repetitions", 0)
+                    .GetSnapshotAsync(cancellationToken);
+
+                foreach (var cardDoc in cardsSnapshot.Documents)
+                {
+                    if (cardDoc.ContainsField("srs_next_review_at"))
+                    {
+                        var nextReview = cardDoc.GetValue<Timestamp>("srs_next_review_at").ToDateTime();
+                        if (nextReview > DateTime.UtcNow)
+                        {
+                            await cardDoc.Reference.UpdateAsync("srs_next_review_at", Timestamp.FromDateTime(DateTime.UtcNow));
+                            _logger.LogInformation(
+                                "[DIAG] Auto-corrected next review time to now for card {CardId} ({Term}) in deck {DeckId} because it was incorrectly scheduled.",
+                                cardDoc.Id,
+                                cardDoc.ContainsField("term") ? cardDoc.GetValue<string>("term") : string.Empty,
+                                deckDoc.Id);
+                        }
+                    }
+                }
+            });
+
+            await Task.WhenAll(tasks);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to auto-correct incorrect review times for user {UserId}", userId);
+        }
     }
 
     /// <inheritdoc />
     public async Task<List<CardResponse>> GetAllDueCardsAsync(
         string userId,
         int limit = 30,
+        string? targetLanguageCode = null,
         CancellationToken cancellationToken = default)
     {
         limit = Math.Clamp(limit, 1, 50);
@@ -1103,6 +1209,7 @@ public class FirestoreService : IFirestoreService
                 deckDoc.Id,
                 deckName,
                 limit,
+                targetLanguageCode,
                 cancellationToken);
         });
 
@@ -1123,16 +1230,19 @@ public class FirestoreService : IFirestoreService
         string deckId,
         string deckName,
         int limit,
+        string? targetLanguageCode,
         CancellationToken cancellationToken)
     {
         var cardsRef = deckRef.Collection("cards");
         var now = Timestamp.FromDateTime(DateTime.UtcNow);
         var result = new List<CardResponse>();
         var seenIds = new HashSet<string>();
+        var targetLangFilter = targetLanguageCode?.Trim().ToLowerInvariant();
+        int fetchLimit = string.IsNullOrEmpty(targetLangFilter) ? limit : limit * 5;
 
         var brandNewSnapshot = await cardsRef
             .OrderByDescending("created_at")
-            .Limit(limit * 3)
+            .Limit(fetchLimit * 3)
             .GetSnapshotAsync(cancellationToken);
 
         foreach (var doc in brandNewSnapshot.Documents)
@@ -1142,7 +1252,11 @@ public class FirestoreService : IFirestoreService
 
             if (!doc.ContainsField("srs_state") && seenIds.Add(doc.Id))
             {
-                result.Add(MapToCardResponse(doc, deckId, deckName));
+                var card = MapToCardResponse(doc, deckId, deckName);
+                if (string.IsNullOrEmpty(targetLangFilter) || string.Equals(card.TargetLangCode, targetLangFilter, StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Add(card);
+                }
             }
         }
 
@@ -1150,7 +1264,7 @@ public class FirestoreService : IFirestoreService
         {
             var newStateSnapshot = await cardsRef
                 .WhereEqualTo("srs_state", "new")
-                .Limit(limit)
+                .Limit(fetchLimit)
                 .GetSnapshotAsync(cancellationToken);
 
             foreach (var doc in newStateSnapshot.Documents)
@@ -1160,7 +1274,11 @@ public class FirestoreService : IFirestoreService
 
                 if (seenIds.Add(doc.Id))
                 {
-                    result.Add(MapToCardResponse(doc, deckId, deckName));
+                    var card = MapToCardResponse(doc, deckId, deckName);
+                    if (string.IsNullOrEmpty(targetLangFilter) || string.Equals(card.TargetLangCode, targetLangFilter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Add(card);
+                    }
                 }
             }
         }
@@ -1170,7 +1288,7 @@ public class FirestoreService : IFirestoreService
             var dueSnapshot = await cardsRef
                 .WhereLessThanOrEqualTo("srs_next_review_at", now)
                 .OrderBy("srs_next_review_at")
-                .Limit(limit)
+                .Limit(fetchLimit)
                 .GetSnapshotAsync(cancellationToken);
 
             foreach (var doc in dueSnapshot.Documents)
@@ -1180,7 +1298,11 @@ public class FirestoreService : IFirestoreService
 
                 if (seenIds.Add(doc.Id))
                 {
-                    result.Add(MapToCardResponse(doc, deckId, deckName));
+                    var card = MapToCardResponse(doc, deckId, deckName);
+                    if (string.IsNullOrEmpty(targetLangFilter) || string.Equals(card.TargetLangCode, targetLangFilter, StringComparison.OrdinalIgnoreCase))
+                    {
+                        result.Add(card);
+                    }
                 }
             }
         }
@@ -1667,6 +1789,29 @@ public class FirestoreService : IFirestoreService
             nextLocalMidnight.UtcDateTime);
     }
 
+    private static string GetVietnamDayKey()
+    {
+        var vietnamOffset = TimeSpan.FromHours(7);
+        var nowLocal = DateTimeOffset.UtcNow.ToOffset(vietnamOffset);
+        return nowLocal.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+    }
+
+    private static ChatQuotaInfo BuildChatQuotaInfo(bool isPremium, int freeDailyLimit, int usedToday)
+    {
+        var limit = Math.Max(0, freeDailyLimit);
+        var normalizedUsed = Math.Max(0, usedToday);
+        var remaining = isPremium ? int.MaxValue : Math.Max(0, limit - normalizedUsed);
+
+        return new ChatQuotaInfo
+        {
+            IsPremium = isPremium,
+            FreeLimit = limit,
+            UsedToday = normalizedUsed,
+            RemainingToday = isPremium ? int.MaxValue : remaining,
+            IsLimitReached = !isPremium && normalizedUsed >= limit,
+        };
+    }
+
     private static bool IsActivePremium(DocumentSnapshot snapshot)
     {
         if (!snapshot.Exists)
@@ -1966,5 +2111,70 @@ public class FirestoreService : IFirestoreService
         }, cancellationToken: cancellationToken);
 
         return updatedStats;
+    }
+
+    public async Task<LeaderboardResponse> GetLeaderboardAsync(
+        string userId,
+        int limit,
+        int offset,
+        CancellationToken cancellationToken = default)
+    {
+        var usersCollection = _db.Collection("users");
+        var snapshot = await usersCollection.GetSnapshotAsync(cancellationToken);
+
+        var allUsers = snapshot.Documents
+            .Select(doc =>
+            {
+                var id = doc.Id;
+                var displayName = doc.ContainsField("display_name")
+                    ? doc.GetValue<string>("display_name")
+                    : (doc.ContainsField("displayName") ? doc.GetValue<string>("displayName") : null);
+                if (string.IsNullOrWhiteSpace(displayName) && doc.ContainsField("email"))
+                {
+                    var email = doc.GetValue<string>("email");
+                    if (!string.IsNullOrWhiteSpace(email))
+                    {
+                        displayName = email.Split('@')[0];
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(displayName))
+                {
+                    displayName = "Milingo User";
+                }
+                var photoUrl = doc.ContainsField("photo_url")
+                    ? doc.GetValue<string?>("photo_url")
+                    : null;
+                var coins = doc.ContainsField("coins")
+                    ? doc.GetValue<int>("coins")
+                    : 0;
+                var totalPoints = doc.ContainsField("total_points")
+                    ? doc.GetValue<int>("total_points")
+                    : coins;
+
+                return new LeaderboardUser
+                {
+                    Id = id,
+                    DisplayName = displayName,
+                    PhotoUrl = photoUrl,
+                    TotalPoints = totalPoints
+                };
+            })
+            .OrderByDescending(u => u.TotalPoints)
+            .ToList();
+
+        // Assign ranks (1-based)
+        for (int i = 0; i < allUsers.Count; i++)
+        {
+            allUsers[i].Rank = i + 1;
+        }
+
+        var paginatedUsers = allUsers.Skip(offset).Take(limit).ToList();
+        var currentUser = allUsers.FirstOrDefault(u => u.Id == userId);
+
+        return new LeaderboardResponse
+        {
+            Users = paginatedUsers,
+            CurrentUser = currentUser
+        };
     }
 }
