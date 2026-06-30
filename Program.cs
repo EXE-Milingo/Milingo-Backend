@@ -80,6 +80,7 @@ builder.Services.AddSingleton(_ => new FirestoreDbBuilder
     DatabaseId = "milingo"
 }.Build());// FirestoreService: Scoped (one instance per HTTP request)
 builder.Services.AddScoped<IFirestoreService, FirestoreService>();
+builder.Services.AddScoped<IAdminAnalyticsService, AdminAnalyticsService>();
 
 // GeminiService disabled: requests now use OpenAiService.
 // builder.Services.AddHttpClient<IGeminiService, GeminiService>(...);
