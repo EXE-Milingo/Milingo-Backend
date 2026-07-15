@@ -13,16 +13,6 @@ public class CreatePayOSOrderRequest
     [Required(ErrorMessage = "PlanId is required.")]
     [JsonPropertyName("planId")]
     public string PlanId { get; set; } = string.Empty;
-
-    [Required(ErrorMessage = "ReturnUrl is required.")]
-    [Url(ErrorMessage = "ReturnUrl must be a valid URL.")]
-    [JsonPropertyName("returnUrl")]
-    public string ReturnUrl { get; set; } = string.Empty;
-
-    [Required(ErrorMessage = "CancelUrl is required.")]
-    [Url(ErrorMessage = "CancelUrl must be a valid URL.")]
-    [JsonPropertyName("cancelUrl")]
-    public string CancelUrl { get; set; } = string.Empty;
 }
 
 public class CreatePayOSOrderResponse
@@ -156,6 +146,21 @@ public class PremiumStatusResponse
 
     [JsonPropertyName("source")]
     public string? Source { get; set; }
+}
+
+public class PayOSOrderStatusResponse
+{
+    [JsonPropertyName("orderCode")]
+    public long OrderCode { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "PENDING";
+
+    [JsonPropertyName("isPaid")]
+    public bool IsPaid { get; set; }
+
+    [JsonPropertyName("expiresAt")]
+    public DateTime? ExpiresAt { get; set; }
 }
 
 public class SubscriptionBenefitResponse

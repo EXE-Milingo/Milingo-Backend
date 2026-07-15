@@ -9,8 +9,10 @@ public interface IPaymentService
     Task<CreatePayOSOrderResponse> CreatePayOSOrderAsync(
         string uid,
         string planId,
-        string returnUrl,
-        string cancelUrl,
+        CancellationToken cancellationToken = default);
+
+    Task<CreatePayOSOrderResponse?> GetPendingPayOSOrderAsync(
+        string uid,
         CancellationToken cancellationToken = default);
 
     Task<bool> HandlePayOSWebhookAsync(
@@ -18,7 +20,13 @@ public interface IPaymentService
         string signature,
         CancellationToken cancellationToken = default);
 
-    Task<bool> VerifyPayOSOrderAsync(
+    Task<PayOSOrderStatusResponse> VerifyPayOSOrderAsync(
+        string uid,
+        long orderCode,
+        CancellationToken cancellationToken = default);
+
+    Task<bool> CancelPayOSOrderAsync(
+        string uid,
         long orderCode,
         CancellationToken cancellationToken = default);
 

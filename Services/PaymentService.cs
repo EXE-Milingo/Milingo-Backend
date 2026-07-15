@@ -63,17 +63,31 @@ public class PaymentService : IPaymentService
     public async Task<CreatePayOSOrderResponse> CreatePayOSOrderAsync(
         string uid,
         string planId,
-        string returnUrl,
-        string cancelUrl,
         CancellationToken cancellationToken = default)
     {
         var clientId = GetRequiredConfig("PayOS:ClientId");
         var apiKey = GetRequiredConfig("PayOS:ApiKey");
         var checksumKey = GetRequiredConfig("PayOS:ChecksumKey");
+        var returnUrl = GetRequiredConfig("PayOS:ReturnUrl");
+        var cancelUrl = GetRequiredConfig("PayOS:CancelUrl");
         var amount = GetPlanAmount(planId);
         var normalizedPlanId = NormalizePlanId(planId);
+        var reusableOrder = await ResolveExistingOrderAsync(
+            uid,
+            normalizedPlanId,
+            cancellationToken);
+        if (reusableOrder is not null)
+        {
+            return reusableOrder;
+        }
+
         var orderCode = GenerateOrderCode();
         var premiumExpiresAt = GetPremiumExpiresAt(normalizedPlanId);
+        var orderExpiryMinutes = Math.Clamp(
+            _configuration.GetValue<int?>("PayOS:OrderExpiryMinutes") ?? 30,
+            5,
+            60);
+        var orderExpiresAt = DateTime.UtcNow.AddMinutes(orderExpiryMinutes);
         var description = BuildPayOSDescription(normalizedPlanId);
 
         var signatureFields = new SortedDictionary<string, object?>(StringComparer.Ordinal)
@@ -87,7 +101,8 @@ public class PaymentService : IPaymentService
 
         var requestBody = new Dictionary<string, object?>(signatureFields)
         {
-            { "signature", CreateHmacSignature(signatureFields, checksumKey) }
+            { "signature", CreateHmacSignature(signatureFields, checksumKey) },
+            { "expiredAt", new DateTimeOffset(orderExpiresAt).ToUnixTimeSeconds() }
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, PayOSPaymentRequestsUrl)
@@ -115,7 +130,7 @@ public class PaymentService : IPaymentService
             throw new HttpRequestException($"PayOS create order failed with HTTP {(int)response.StatusCode}.");
         }
 
-        var result = ParsePayOSCreateOrderResponse(responseBody);
+        var result = PayOSProtocol.ParseCreateOrder(responseBody, orderExpiresAt);
         if (result.OrderCode == 0)
         {
             result.OrderCode = orderCode;
@@ -128,6 +143,7 @@ public class PaymentService : IPaymentService
             result.OrderCode,
             result.PaymentLinkId,
             result.CheckoutUrl,
+            result,
             premiumExpiresAt,
             cancellationToken);
 
@@ -138,6 +154,96 @@ public class PaymentService : IPaymentService
         return result;
     }
 
+    public async Task<CreatePayOSOrderResponse?> GetPendingPayOSOrderAsync(
+        string uid,
+        CancellationToken cancellationToken = default)
+    {
+        var orders = await GetUserPaymentOrdersAsync(uid, cancellationToken);
+        foreach (var order in orders
+                     .Where(IsPendingPayOSOrder)
+                     .OrderByDescending(GetOrderSortDate))
+        {
+            if (!order.OrderCode.HasValue)
+            {
+                continue;
+            }
+
+            var status = await VerifyPayOSOrderAsync(
+                uid,
+                order.OrderCode.Value,
+                cancellationToken);
+            if (!string.Equals(status.Status, "PENDING", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (HasRecoverableQr(order))
+            {
+                return ToCreateOrderResponse(order, status.Status);
+            }
+
+            await CancelPayOSOrderAsync(uid, order.OrderCode.Value, cancellationToken);
+        }
+
+        return null;
+    }
+
+    public async Task<bool> CancelPayOSOrderAsync(
+        string uid,
+        long orderCode,
+        CancellationToken cancellationToken = default)
+    {
+        var orderRef = _db.Collection("payment_orders")
+            .Document(orderCode.ToString(CultureInfo.InvariantCulture));
+        var snapshot = await orderRef.GetSnapshotAsync(cancellationToken);
+        if (!snapshot.Exists)
+        {
+            throw new KeyNotFoundException($"Payment order {orderCode} was not found.");
+        }
+
+        var ownerUid = snapshot.GetValue<string>("uid");
+        if (!string.Equals(uid, ownerUid, StringComparison.Ordinal))
+        {
+            throw new UnauthorizedAccessException("The payment order belongs to another user.");
+        }
+
+        var status = snapshot.ContainsField("status")
+            ? snapshot.GetValue<string>("status")
+            : "PENDING";
+        if (!string.Equals(status, "PENDING", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var clientId = GetRequiredConfig("PayOS:ClientId");
+        var apiKey = GetRequiredConfig("PayOS:ApiKey");
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"{PayOSPaymentRequestsUrl}/{orderCode}/cancel")
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(
+                    new { cancellationReason = "User selected another MiLingo plan" },
+                    _jsonOptions),
+                Encoding.UTF8,
+                "application/json")
+        };
+        request.Headers.Add("x-client-id", clientId);
+        request.Headers.Add("x-api-key", apiKey);
+        using var response = await _httpClient.SendAsync(request, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning(
+                "PayOS cancellation failed for order {OrderCode} with HTTP {StatusCode}.",
+                orderCode,
+                (int)response.StatusCode);
+            return false;
+        }
+
+        await MarkPayOSOrderStatusAsync(orderCode, "CANCELLED", cancellationToken);
+        return true;
+    }
+
     /// <inheritdoc />
     public async Task<bool> HandlePayOSWebhookAsync(
         PayOSWebhookPayload payload,
@@ -145,14 +251,12 @@ public class PaymentService : IPaymentService
         CancellationToken cancellationToken = default)
     {
         var checksumKey = GetRequiredConfig("PayOS:ChecksumKey");
-
-        if (string.IsNullOrWhiteSpace(signature))
+        if (string.IsNullOrWhiteSpace(payload.Signature))
         {
-            _logger.LogWarning("PayOS webhook rejected: missing signature.");
-            return false;
+            payload.Signature = signature;
         }
 
-        if (!VerifyPayOSSignature(payload.Data, signature, checksumKey))
+        if (!PayOSProtocol.VerifyWebhook(payload, checksumKey))
         {
             _logger.LogWarning(
                 "PayOS webhook rejected: invalid signature for order {OrderCode}.",
@@ -161,16 +265,11 @@ public class PaymentService : IPaymentService
         }
 
         _logger.LogInformation(
-            "PayOS webhook verified for order {OrderCode}. Code='{Code}', Status='{Status}'.",
-            payload.Data.OrderCode, payload.Code, payload.Data.Status);
+            "PayOS webhook verified for order {OrderCode}. Code='{Code}', TransactionCode='{TransactionCode}'.",
+            payload.Data.OrderCode, payload.Code, payload.Data.Code);
 
-        if (!string.Equals(payload.Code, "00", StringComparison.OrdinalIgnoreCase)
-            || !string.Equals(payload.Data.Status, "PAID", StringComparison.OrdinalIgnoreCase))
+        if (!PayOSProtocol.IsPaidWebhook(payload))
         {
-            await MarkPayOSOrderStatusAsync(
-                payload.Data.OrderCode,
-                string.IsNullOrWhiteSpace(payload.Data.Status) ? payload.Code : payload.Data.Status,
-                cancellationToken);
             return true;
         }
 
@@ -181,6 +280,11 @@ public class PaymentService : IPaymentService
                 "PayOS webhook paid but order {OrderCode} not found in Firestore.",
                 payload.Data.OrderCode);
             return false;
+        }
+
+        if (IsPaidStatus(order.Status))
+        {
+            return true;
         }
 
         if (order.Amount != payload.Data.Amount)
@@ -207,26 +311,36 @@ public class PaymentService : IPaymentService
     }
 
     /// <inheritdoc />
-    public async Task<bool> VerifyPayOSOrderAsync(
+    public async Task<PayOSOrderStatusResponse> VerifyPayOSOrderAsync(
+        string uid,
         long orderCode,
         CancellationToken cancellationToken = default)
     {
         var clientId = GetRequiredConfig("PayOS:ClientId");
         var apiKey = GetRequiredConfig("PayOS:ApiKey");
-
         var orderRef = _db.Collection("payment_orders")
             .Document(orderCode.ToString(CultureInfo.InvariantCulture));
         var snapshot = await orderRef.GetSnapshotAsync(cancellationToken);
         if (!snapshot.Exists)
         {
-            _logger.LogWarning("Verification failed: Order {OrderCode} not found in Firestore.", orderCode);
-            return false;
+            throw new KeyNotFoundException($"Payment order {orderCode} was not found.");
         }
 
-        var currentStatus = snapshot.ContainsField("status") ? snapshot.GetValue<string>("status") : "PENDING";
+        var ownerUid = snapshot.GetValue<string>("uid");
+        if (!string.Equals(ownerUid, uid, StringComparison.Ordinal))
+        {
+            throw new UnauthorizedAccessException("The payment order belongs to another user.");
+        }
+
+        var currentStatus = snapshot.ContainsField("status")
+            ? snapshot.GetValue<string>("status")
+            : "PENDING";
+        var orderExpiresAt = snapshot.ContainsField("expiresAt")
+            ? snapshot.GetValue<Timestamp>("expiresAt").ToDateTime()
+            : (DateTime?)null;
         if (IsPaidStatus(currentStatus))
         {
-            return true;
+            return BuildOrderStatus(orderCode, currentStatus, orderExpiresAt);
         }
 
         var url = $"{PayOSPaymentRequestsUrl}/{orderCode}";
@@ -234,64 +348,69 @@ public class PaymentService : IPaymentService
         request.Headers.Add("x-client-id", clientId);
         request.Headers.Add("x-api-key", apiKey);
 
-        _logger.LogInformation("Querying PayOS order status for {OrderCode} directly from API.", orderCode);
-
         try
         {
             using var response = await _httpClient.SendAsync(request, cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
-                var body = await response.Content.ReadAsStringAsync(cancellationToken);
-                _logger.LogWarning("PayOS query order failed. HTTP {StatusCode}: {Body}", (int)response.StatusCode, body);
-                return false;
+                _logger.LogWarning(
+                    "PayOS query order {OrderCode} failed with HTTP {StatusCode}.",
+                    orderCode,
+                    (int)response.StatusCode);
+                return BuildOrderStatus(orderCode, currentStatus, orderExpiresAt);
             }
 
             var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
             var payload = JsonSerializer.Deserialize<PayOSWebhookPayload>(responseBody, _jsonOptions);
-            if (payload == null || !string.Equals(payload.Code, "00", StringComparison.OrdinalIgnoreCase) || payload.Data == null)
+            if (payload is null
+                || !string.Equals(payload.Code, "00", StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogWarning("PayOS query order returned invalid or error payload: {Body}", responseBody);
-                return false;
+                return BuildOrderStatus(orderCode, currentStatus, orderExpiresAt);
             }
 
-            var payosStatus = payload.Data.Status;
-            if (string.Equals(payosStatus, "PAID", StringComparison.OrdinalIgnoreCase))
+            var payosStatus = string.IsNullOrWhiteSpace(payload.Data.Status)
+                ? currentStatus
+                : payload.Data.Status.ToUpperInvariant();
+            if (IsPaidStatus(payosStatus))
             {
-                var uid = snapshot.GetValue<string>("uid");
-                var expiresAtUtc = snapshot.ContainsField("premiumExpiresAt")
+                var premiumExpiresAt = snapshot.ContainsField("premiumExpiresAt")
                     ? snapshot.GetValue<Timestamp>("premiumExpiresAt").ToDateTime()
-                    : GetPremiumExpiresAt(snapshot.ContainsField("planId") ? snapshot.GetValue<string>("planId") : "monthly");
-
+                    : GetPremiumExpiresAt(snapshot.ContainsField("planId")
+                        ? snapshot.GetValue<string>("planId")
+                        : "monthly");
                 await _firestoreService.SetPremiumAsync(
                     uid,
-                    expiresAtUtc,
+                    premiumExpiresAt,
                     "payos",
                     cancellationToken);
-
                 await MarkPayOSOrderStatusAsync(orderCode, "PAID", cancellationToken);
+                return BuildOrderStatus(orderCode, "PAID", orderExpiresAt);
+            }
 
-                _logger.LogInformation(
-                    "Direct verification: PayOS order {OrderCode} confirmed PAID. Premium granted to user '{Uid}'.",
-                    orderCode, uid);
-                return true;
-            }
-            else if (string.Equals(payosStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase) ||
-                     string.Equals(payosStatus, "EXPIRED", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(payosStatus, "CANCELLED", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(payosStatus, "EXPIRED", StringComparison.OrdinalIgnoreCase))
             {
-                await MarkPayOSOrderStatusAsync(orderCode, payosStatus.ToUpperInvariant(), cancellationToken);
-                _logger.LogInformation("Direct verification: PayOS order {OrderCode} is {Status}.", orderCode, payosStatus);
+                await MarkPayOSOrderStatusAsync(orderCode, payosStatus, cancellationToken);
+                return BuildOrderStatus(orderCode, payosStatus, orderExpiresAt);
             }
-            else
+
+            if (orderExpiresAt.HasValue && orderExpiresAt.Value <= DateTime.UtcNow)
             {
-                _logger.LogInformation("Direct verification: PayOS order {OrderCode} is still {Status}.", orderCode, payosStatus);
+                await MarkPayOSOrderStatusAsync(orderCode, "EXPIRED", cancellationToken);
+                return BuildOrderStatus(orderCode, "EXPIRED", orderExpiresAt);
             }
+
+            return BuildOrderStatus(orderCode, payosStatus, orderExpiresAt);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Unexpected error querying PayOS status for order {OrderCode}.", orderCode);
+            _logger.LogError(ex, "Unexpected error querying PayOS order {OrderCode}.", orderCode);
+            return BuildOrderStatus(orderCode, currentStatus, orderExpiresAt);
         }
-
-        return false;
     }
 
     /// <inheritdoc />
@@ -316,7 +435,7 @@ public class PaymentService : IPaymentService
             {
                 if (order.OrderCode.HasValue)
                 {
-                    await VerifyPayOSOrderAsync(order.OrderCode.Value, cancellationToken);
+                    await VerifyPayOSOrderAsync(uid, order.OrderCode.Value, cancellationToken);
                 }
             }
         }
@@ -451,29 +570,111 @@ public class PaymentService : IPaymentService
         };
     }
 
-    private CreatePayOSOrderResponse ParsePayOSCreateOrderResponse(string responseBody)
+    private async Task<CreatePayOSOrderResponse?> ResolveExistingOrderAsync(
+        string uid,
+        string requestedPlanId,
+        CancellationToken cancellationToken)
     {
-        using var doc = JsonDocument.Parse(responseBody);
-        var root = doc.RootElement;
-        var code = root.TryGetProperty("code", out var codeElement)
-            ? codeElement.GetString()
-            : null;
-
-        if (!string.Equals(code, "00", StringComparison.OrdinalIgnoreCase))
+        var orders = await GetUserPaymentOrdersAsync(uid, cancellationToken);
+        foreach (var order in orders
+                     .Where(IsPendingPayOSOrder)
+                     .OrderByDescending(GetOrderSortDate))
         {
-            var desc = root.TryGetProperty("desc", out var descElement)
-                ? descElement.GetString()
-                : "Unknown PayOS error.";
-            _logger.LogWarning("PayOS create order returned code '{Code}': {Desc}", code, desc);
-            throw new InvalidOperationException("PayOS rejected the payment order.");
+            if (!order.OrderCode.HasValue)
+            {
+                continue;
+            }
+
+            var verified = await VerifyPayOSOrderAsync(
+                uid,
+                order.OrderCode.Value,
+                cancellationToken);
+            var action = PaymentOrderPolicy.Decide(
+                requestedPlanId,
+                order.PlanId,
+                verified.Status,
+                order.ExpiresAt ?? DateTime.MinValue,
+                DateTime.UtcNow);
+            if (action == PaymentOrderAction.RefreshEntitlement)
+            {
+                return ToCreateOrderResponse(order, "PAID");
+            }
+
+            if (action == PaymentOrderAction.Reuse && HasRecoverableQr(order))
+            {
+                return ToCreateOrderResponse(order, verified.Status);
+            }
+
+            var mustCancel = action is PaymentOrderAction.Reuse
+                or PaymentOrderAction.CancelAndReplace
+                || (action == PaymentOrderAction.Replace
+                    && string.Equals(
+                        verified.Status,
+                        "PENDING",
+                        StringComparison.OrdinalIgnoreCase));
+            if (mustCancel)
+            {
+                var cancelled = await CancelPayOSOrderAsync(
+                    uid,
+                    order.OrderCode.Value,
+                    cancellationToken);
+                if (!cancelled)
+                {
+                    throw new InvalidOperationException(
+                        "The existing PayOS order could not be cancelled safely.");
+                }
+            }
         }
 
-        var data = root.GetProperty("data");
+        return null;
+    }
+
+    private static bool IsPendingPayOSOrder(PaymentOrderDocument order)
+    {
+        return string.Equals(order.Source, "payos", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(order.Status, "PENDING", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasRecoverableQr(PaymentOrderDocument order)
+    {
+        return !string.IsNullOrWhiteSpace(order.QrCode)
+            && !string.IsNullOrWhiteSpace(order.AccountNumber)
+            && !string.IsNullOrWhiteSpace(order.Description)
+            && order.Amount > 0
+            && order.ExpiresAt.HasValue;
+    }
+
+    private static CreatePayOSOrderResponse ToCreateOrderResponse(
+        PaymentOrderDocument order,
+        string status)
+    {
         return new CreatePayOSOrderResponse
         {
-            CheckoutUrl = data.GetProperty("checkoutUrl").GetString() ?? string.Empty,
-            OrderCode = data.GetProperty("orderCode").GetInt64(),
-            PaymentLinkId = data.GetProperty("paymentLinkId").GetString() ?? string.Empty
+            Bin = order.Bin,
+            AccountNumber = order.AccountNumber,
+            AccountName = order.AccountName,
+            Amount = order.Amount,
+            Description = order.Description,
+            CheckoutUrl = order.CheckoutUrl,
+            OrderCode = order.OrderCode ?? 0,
+            PaymentLinkId = order.PaymentLinkId,
+            QrCode = order.QrCode,
+            Status = status,
+            ExpiresAt = order.ExpiresAt ?? DateTime.MinValue
+        };
+    }
+
+    private static PayOSOrderStatusResponse BuildOrderStatus(
+        long orderCode,
+        string status,
+        DateTime? expiresAt)
+    {
+        return new PayOSOrderStatusResponse
+        {
+            OrderCode = orderCode,
+            Status = status,
+            IsPaid = IsPaidStatus(status),
+            ExpiresAt = expiresAt
         };
     }
 
@@ -552,6 +753,7 @@ public class PaymentService : IPaymentService
         long orderCode,
         string paymentLinkId,
         string checkoutUrl,
+        CreatePayOSOrderResponse payment,
         DateTime premiumExpiresAt,
         CancellationToken cancellationToken)
     {
@@ -567,6 +769,14 @@ public class PaymentService : IPaymentService
             { "orderCode", orderCode },
             { "paymentLinkId", paymentLinkId },
             { "checkoutUrl", checkoutUrl },
+            { "bin", payment.Bin },
+            { "accountNumber", payment.AccountNumber },
+            { "accountName", payment.AccountName },
+            { "description", payment.Description },
+            { "qrCode", payment.QrCode },
+            { "expiresAt", Timestamp.FromDateTime(DateTime.SpecifyKind(
+                payment.ExpiresAt.ToUniversalTime(),
+                DateTimeKind.Utc)) },
             { "status", "PENDING" },
             { "premiumExpiresAt", Timestamp.FromDateTime(expiresAtUtc) },
             { "source", "payos" },
@@ -589,6 +799,7 @@ public class PaymentService : IPaymentService
         return new PayOSOrderRecord(
             snapshot.GetValue<string>("uid"),
             snapshot.ContainsField("amount") ? snapshot.GetValue<int>("amount") : 0,
+            snapshot.ContainsField("status") ? snapshot.GetValue<string>("status") : "PENDING",
             snapshot.ContainsField("premiumExpiresAt")
                 ? snapshot.GetValue<Timestamp>("premiumExpiresAt").ToDateTime()
                 : GetPremiumExpiresAt(snapshot.ContainsField("planId")
@@ -816,6 +1027,12 @@ public class PaymentService : IPaymentService
             GetString(data, "source", "payos"),
             GetString(data, "paymentLinkId", string.Empty),
             GetString(data, "checkoutUrl", string.Empty),
+            GetString(data, "bin", string.Empty),
+            GetString(data, "accountNumber", string.Empty),
+            GetString(data, "accountName", string.Empty),
+            GetString(data, "description", string.Empty),
+            GetString(data, "qrCode", string.Empty),
+            GetDateTime(data, "expiresAt"),
             createdAt,
             updatedAt,
             paidAt,
@@ -1050,6 +1267,7 @@ public class PaymentService : IPaymentService
     private sealed record PayOSOrderRecord(
         string Uid,
         int Amount,
+        string Status,
         DateTime PremiumExpiresAt);
 
     private sealed record PaymentPlanDefinition(
@@ -1066,6 +1284,12 @@ public class PaymentService : IPaymentService
         string Source,
         string PaymentLinkId,
         string CheckoutUrl,
+        string Bin,
+        string AccountNumber,
+        string AccountName,
+        string Description,
+        string QrCode,
+        DateTime? ExpiresAt,
         DateTime? CreatedAt,
         DateTime? UpdatedAt,
         DateTime? PaidAt,
