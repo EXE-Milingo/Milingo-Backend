@@ -10,7 +10,8 @@ internal static class PayOSProtocol
 {
     internal static CreatePayOSOrderResponse ParseCreateOrder(
         string responseBody,
-        DateTime expiresAtUtc)
+        DateTime expiresAtUtc,
+        string bankName)
     {
         using var document = JsonDocument.Parse(responseBody);
         var root = document.RootElement;
@@ -26,6 +27,7 @@ internal static class PayOSProtocol
         return new CreatePayOSOrderResponse
         {
             Bin = ReadString(data, "bin"),
+            BankName = bankName,
             AccountNumber = ReadString(data, "accountNumber"),
             AccountName = ReadString(data, "accountName"),
             Amount = data.TryGetProperty("amount", out var amount)

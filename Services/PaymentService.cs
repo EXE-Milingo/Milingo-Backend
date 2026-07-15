@@ -68,6 +68,7 @@ public class PaymentService : IPaymentService
         var clientId = GetRequiredConfig("PayOS:ClientId");
         var apiKey = GetRequiredConfig("PayOS:ApiKey");
         var checksumKey = GetRequiredConfig("PayOS:ChecksumKey");
+        var bankName = GetRequiredConfig("PayOS:BankName");
         var returnUrl = GetRequiredConfig("PayOS:ReturnUrl");
         var cancelUrl = GetRequiredConfig("PayOS:CancelUrl");
         var amount = GetPlanAmount(planId);
@@ -130,7 +131,10 @@ public class PaymentService : IPaymentService
             throw new HttpRequestException($"PayOS create order failed with HTTP {(int)response.StatusCode}.");
         }
 
-        var result = PayOSProtocol.ParseCreateOrder(responseBody, orderExpiresAt);
+        var result = PayOSProtocol.ParseCreateOrder(
+            responseBody,
+            orderExpiresAt,
+            bankName);
         if (result.OrderCode == 0)
         {
             result.OrderCode = orderCode;
@@ -644,13 +648,16 @@ public class PaymentService : IPaymentService
             && order.ExpiresAt.HasValue;
     }
 
-    private static CreatePayOSOrderResponse ToCreateOrderResponse(
+    private CreatePayOSOrderResponse ToCreateOrderResponse(
         PaymentOrderDocument order,
         string status)
     {
         return new CreatePayOSOrderResponse
         {
             Bin = order.Bin,
+            BankName = PaymentOrderPolicy.ResolveBankName(
+                order.BankName,
+                GetRequiredConfig("PayOS:BankName")),
             AccountNumber = order.AccountNumber,
             AccountName = order.AccountName,
             Amount = order.Amount,
@@ -770,6 +777,7 @@ public class PaymentService : IPaymentService
             { "paymentLinkId", paymentLinkId },
             { "checkoutUrl", checkoutUrl },
             { "bin", payment.Bin },
+            { "bankName", payment.BankName },
             { "accountNumber", payment.AccountNumber },
             { "accountName", payment.AccountName },
             { "description", payment.Description },
@@ -1028,6 +1036,7 @@ public class PaymentService : IPaymentService
             GetString(data, "paymentLinkId", string.Empty),
             GetString(data, "checkoutUrl", string.Empty),
             GetString(data, "bin", string.Empty),
+            GetString(data, "bankName", string.Empty),
             GetString(data, "accountNumber", string.Empty),
             GetString(data, "accountName", string.Empty),
             GetString(data, "description", string.Empty),
@@ -1285,6 +1294,7 @@ public class PaymentService : IPaymentService
         string PaymentLinkId,
         string CheckoutUrl,
         string Bin,
+        string BankName,
         string AccountNumber,
         string AccountName,
         string Description,

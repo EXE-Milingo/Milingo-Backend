@@ -34,9 +34,11 @@ public class PayOSProtocolTests
             """;
         var expiresAt = new DateTime(2026, 7, 15, 10, 30, 0, DateTimeKind.Utc);
 
-        var result = PayOSProtocol.ParseCreateOrder(json, expiresAt);
+        const string bankName = "Ngân hàng Thương mại Cổ phần Quân đội (MB)";
+        var result = PayOSProtocol.ParseCreateOrder(json, expiresAt, bankName);
 
         Assert.Equal("970422", result.Bin);
+        Assert.Equal(bankName, result.BankName);
         Assert.Equal("113366668888", result.AccountNumber);
         Assert.Equal("MERCHANT NAME", result.AccountName);
         Assert.Equal(139000, result.Amount);

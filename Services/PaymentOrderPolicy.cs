@@ -10,6 +10,15 @@ internal enum PaymentOrderAction
 
 internal static class PaymentOrderPolicy
 {
+    internal static string ResolveBankName(
+        string? storedBankName,
+        string configuredBankName)
+    {
+        return string.IsNullOrWhiteSpace(storedBankName)
+            ? configuredBankName
+            : storedBankName;
+    }
+
     internal static PaymentOrderAction Decide(
         string requestedPlanId,
         string existingPlanId,

@@ -20,6 +20,9 @@ public class CreatePayOSOrderResponse
     [JsonPropertyName("bin")]
     public string Bin { get; set; } = string.Empty;
 
+    [JsonPropertyName("bankName")]
+    public string BankName { get; set; } = string.Empty;
+
     [JsonPropertyName("accountNumber")]
     public string AccountNumber { get; set; } = string.Empty;
 

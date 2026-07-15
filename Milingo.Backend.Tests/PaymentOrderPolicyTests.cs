@@ -5,6 +5,24 @@ namespace Milingo.Backend.Tests;
 
 public class PaymentOrderPolicyTests
 {
+    [Fact]
+    public void ResolveBankName_keeps_persisted_legal_name()
+    {
+        Assert.Equal(
+            "Persisted Legal Bank",
+            PaymentOrderPolicy.ResolveBankName(
+                "Persisted Legal Bank",
+                "Configured Legal Bank"));
+    }
+
+    [Fact]
+    public void ResolveBankName_uses_configuration_for_legacy_order()
+    {
+        Assert.Equal(
+            "Configured Legal Bank",
+            PaymentOrderPolicy.ResolveBankName(null, "Configured Legal Bank"));
+    }
+
     private static readonly DateTime NowUtc =
         new(2026, 7, 15, 10, 0, 0, DateTimeKind.Utc);
 
