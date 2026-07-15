@@ -13,7 +13,10 @@
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
-<ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Milingo.Backend.Tests\**\*.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <None Update="firebase-key.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
