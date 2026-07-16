@@ -294,7 +294,12 @@ public class StudyController : ControllerBase
         const int needed = 3;
 
         var realDistractors = await _firestoreService.GetDistractorCardsAsync(
-            userId, deckId, excludeIds, needed, cancellationToken);
+            userId,
+            deckId,
+            correctCard.TargetLangCode,
+            excludeIds,
+            needed,
+            cancellationToken);
 
         var usedTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {

@@ -1378,6 +1378,7 @@ public class FirestoreService : IFirestoreService
     public async Task<List<CardResponse>> GetDistractorCardsAsync(
         string userId,
         string deckId,
+        string targetLanguageCode,
         IEnumerable<string> excludeCardIds,
         int count = 3,
         CancellationToken cancellationToken = default)
@@ -1400,6 +1401,9 @@ public class FirestoreService : IFirestoreService
                 .Where(doc => !exclude.Contains(doc.Id))
                 .Select(doc => MapToCardResponse(doc, candidateDeckId))
                 .Where(card => !string.IsNullOrWhiteSpace(card.Term))
+                .Where(card => StudyDistractorPolicy.MatchesTargetLanguage(
+                    card.TargetLangCode,
+                    targetLanguageCode))
                 .OrderBy(_ => Guid.NewGuid());
 
             foreach (var candidate in candidates)

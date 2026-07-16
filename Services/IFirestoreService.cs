@@ -229,6 +229,7 @@ public interface IFirestoreService
     Task<List<CardResponse>> GetDistractorCardsAsync(
         string userId,
         string deckId,
+        string targetLanguageCode,
         IEnumerable<string> excludeCardIds,
         int count = 3,
         CancellationToken cancellationToken = default);
