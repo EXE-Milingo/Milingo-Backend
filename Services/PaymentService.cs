@@ -383,7 +383,7 @@ public class PaymentService : IPaymentService
                 await ApplyPaidPayOSOrderAsync(
                     orderCode,
                     uid,
-                    snapshot.GetValue<int>("amount"),
+                    payload.Data.Amount,
                     DateTime.UtcNow,
                     cancellationToken);
                 return BuildOrderStatus(orderCode, "PAID", orderExpiresAt);

@@ -8,12 +8,16 @@ public class PaymentServiceRenewalSourceTests
     public void PayOS_paid_paths_share_one_atomic_entitlement_operation()
     {
         var source = File.ReadAllText(RepositoryFile("Services", "PaymentService.cs"));
+        var normalizedSource = source.Replace("\r\n", "\n");
 
         Assert.Equal(3, Count(source, "ApplyPaidPayOSOrderAsync("));
         Assert.Contains("RunTransactionAsync", source);
         Assert.Contains("entitlementAppliedAt", source);
         Assert.Contains("grantedPremiumExpiresAt", source);
         Assert.Equal(1, Count(source, "SetPremiumAsync("));
+        Assert.Contains(
+            "uid,\n                    payload.Data.Amount,\n",
+            normalizedSource);
     }
 
     private static string RepositoryFile(params string[] parts)
