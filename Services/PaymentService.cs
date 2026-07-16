@@ -73,6 +73,8 @@ public class PaymentService : IPaymentService
         var cancelUrl = GetRequiredConfig("PayOS:CancelUrl");
         var amount = GetPlanAmount(planId);
         var normalizedPlanId = NormalizePlanId(planId);
+        var durationDays = GetConfiguredPlanDurationDays(
+            GetPaymentPlan(normalizedPlanId));
         var reusableOrder = await ResolveExistingOrderAsync(
             uid,
             normalizedPlanId,
@@ -83,7 +85,6 @@ public class PaymentService : IPaymentService
         }
 
         var orderCode = GenerateOrderCode();
-        var premiumExpiresAt = GetPremiumExpiresAt(normalizedPlanId);
         var orderExpiryMinutes = Math.Clamp(
             _configuration.GetValue<int?>("PayOS:OrderExpiryMinutes") ?? 30,
             5,
@@ -148,7 +149,7 @@ public class PaymentService : IPaymentService
             result.PaymentLinkId,
             result.CheckoutUrl,
             result,
-            premiumExpiresAt,
+            durationDays,
             cancellationToken);
 
         _logger.LogInformation(
@@ -761,13 +762,11 @@ public class PaymentService : IPaymentService
         string paymentLinkId,
         string checkoutUrl,
         CreatePayOSOrderResponse payment,
-        DateTime premiumExpiresAt,
+        int durationDays,
         CancellationToken cancellationToken)
     {
         var orderRef = _db.Collection("payment_orders")
             .Document(orderCode.ToString(CultureInfo.InvariantCulture));
-        var expiresAtUtc = DateTime.SpecifyKind(premiumExpiresAt.ToUniversalTime(), DateTimeKind.Utc);
-
         await orderRef.SetAsync(new Dictionary<string, object>
         {
             { "uid", uid },
@@ -786,7 +785,7 @@ public class PaymentService : IPaymentService
                 payment.ExpiresAt.ToUniversalTime(),
                 DateTimeKind.Utc)) },
             { "status", "PENDING" },
-            { "premiumExpiresAt", Timestamp.FromDateTime(expiresAtUtc) },
+            { "durationDays", durationDays },
             { "source", "payos" },
             { "createdAt", FieldValue.ServerTimestamp },
             { "updatedAt", FieldValue.ServerTimestamp }
