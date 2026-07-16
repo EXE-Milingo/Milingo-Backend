@@ -13,20 +13,28 @@ public class CreatePayOSOrderRequest
     [Required(ErrorMessage = "PlanId is required.")]
     [JsonPropertyName("planId")]
     public string PlanId { get; set; } = string.Empty;
-
-    [Required(ErrorMessage = "ReturnUrl is required.")]
-    [Url(ErrorMessage = "ReturnUrl must be a valid URL.")]
-    [JsonPropertyName("returnUrl")]
-    public string ReturnUrl { get; set; } = string.Empty;
-
-    [Required(ErrorMessage = "CancelUrl is required.")]
-    [Url(ErrorMessage = "CancelUrl must be a valid URL.")]
-    [JsonPropertyName("cancelUrl")]
-    public string CancelUrl { get; set; } = string.Empty;
 }
 
 public class CreatePayOSOrderResponse
 {
+    [JsonPropertyName("bin")]
+    public string Bin { get; set; } = string.Empty;
+
+    [JsonPropertyName("bankName")]
+    public string BankName { get; set; } = string.Empty;
+
+    [JsonPropertyName("accountNumber")]
+    public string AccountNumber { get; set; } = string.Empty;
+
+    [JsonPropertyName("accountName")]
+    public string AccountName { get; set; } = string.Empty;
+
+    [JsonPropertyName("amount")]
+    public int Amount { get; set; }
+
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = string.Empty;
+
     [JsonPropertyName("checkoutUrl")]
     public string CheckoutUrl { get; set; } = string.Empty;
 
@@ -35,6 +43,15 @@ public class CreatePayOSOrderResponse
 
     [JsonPropertyName("paymentLinkId")]
     public string PaymentLinkId { get; set; } = string.Empty;
+
+    [JsonPropertyName("qrCode")]
+    public string QrCode { get; set; } = string.Empty;
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "PENDING";
+
+    [JsonPropertyName("expiresAt")]
+    public DateTime ExpiresAt { get; set; }
 }
 
 public class SubscriptionPlanResponse
@@ -60,8 +77,14 @@ public class PayOSWebhookPayload
     [JsonPropertyName("desc")]
     public string Desc { get; set; } = string.Empty;
 
+    [JsonPropertyName("success")]
+    public bool Success { get; set; }
+
     [JsonPropertyName("data")]
     public PayOSWebhookData Data { get; set; } = new();
+
+    [JsonPropertyName("signature")]
+    public string Signature { get; set; } = string.Empty;
 }
 
 public class PayOSWebhookData
@@ -77,6 +100,12 @@ public class PayOSWebhookData
 
     [JsonPropertyName("paymentLinkId")]
     public string PaymentLinkId { get; set; } = string.Empty;
+
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [JsonPropertyName("desc")]
+    public string Desc { get; set; } = string.Empty;
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtraData { get; set; }
@@ -120,6 +149,21 @@ public class PremiumStatusResponse
 
     [JsonPropertyName("source")]
     public string? Source { get; set; }
+}
+
+public class PayOSOrderStatusResponse
+{
+    [JsonPropertyName("orderCode")]
+    public long OrderCode { get; set; }
+
+    [JsonPropertyName("status")]
+    public string Status { get; set; } = "PENDING";
+
+    [JsonPropertyName("isPaid")]
+    public bool IsPaid { get; set; }
+
+    [JsonPropertyName("expiresAt")]
+    public DateTime? ExpiresAt { get; set; }
 }
 
 public class SubscriptionBenefitResponse

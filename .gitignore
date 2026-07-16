@@ -7,3 +7,4 @@ obj
 swagger-check.json
 firebase-key.json
 AGENT_CONTEXT.md
+.hatch-pet-runs/

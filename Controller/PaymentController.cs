@@ -64,8 +64,6 @@ public class PaymentController : ControllerBase
             var result = await _paymentService.CreatePayOSOrderAsync(
                 uid,
                 request.PlanId,
-                request.ReturnUrl,
-                request.CancelUrl,
                 cancellationToken);
 
             return Ok(new ApiResponse<CreatePayOSOrderResponse>
@@ -100,19 +98,27 @@ public class PaymentController : ControllerBase
     {
         try
         {
-            var signature = Request.Headers.TryGetValue("x-payos-signature", out var values)
-                ? values.FirstOrDefault() ?? string.Empty
-                : string.Empty;
+            var signature = payload.Signature;
+            if (string.IsNullOrWhiteSpace(signature)
+                && Request.Headers.TryGetValue("x-payos-signature", out var values))
+            {
+                signature = values.FirstOrDefault() ?? string.Empty;
+            }
 
             var handled = await _paymentService.HandlePayOSWebhookAsync(
                 payload,
                 signature,
                 cancellationToken);
 
+            if (!handled)
+            {
+                return BadRequest(ErrorResponse("Invalid PayOS webhook."));
+            }
+
             return Ok(new ApiResponse<object>
             {
                 Status = "success",
-                Message = handled ? "Webhook processed." : "Webhook received."
+                Message = "Webhook processed."
             });
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -123,11 +129,9 @@ public class PaymentController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unexpected error handling PayOS webhook.");
-            return Ok(new ApiResponse<object>
-            {
-                Status = "success",
-                Message = "Webhook received."
-            });
+            return StatusCode(
+                StatusCodes.Status500InternalServerError,
+                ErrorResponse("Webhook processing failed."));
         }
     }
 
@@ -205,19 +209,79 @@ public class PaymentController : ControllerBase
             if (string.IsNullOrEmpty(uid))
                 return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
 
-            var verified = await _paymentService.VerifyPayOSOrderAsync(orderCode, cancellationToken);
+            var result = await _paymentService.VerifyPayOSOrderAsync(
+                uid,
+                orderCode,
+                cancellationToken);
 
-            return Ok(new ApiResponse<object>
+            return Ok(new ApiResponse<PayOSOrderStatusResponse>
             {
-                Status = verified ? "success" : "error",
-                Message = verified ? "Order verified and paid." : "Order is not paid or verification failed."
+                Status = "success",
+                Message = result.IsPaid ? "Order verified and paid." : "Order status retrieved.",
+                Data = result
             });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Forbid();
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(ErrorResponse(ex.Message));
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Unexpected error verifying PayOS order {OrderCode}.", orderCode);
             return StatusCode(StatusCodes.Status500InternalServerError,
                 ErrorResponse("An unexpected error occurred. Please try again."));
+        }
+    }
+
+    [HttpGet("payos/pending-order")]
+    public async Task<IActionResult> GetPendingOrder(CancellationToken cancellationToken)
+    {
+        var uid = User.GetFirebaseUid();
+        if (string.IsNullOrEmpty(uid))
+            return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
+
+        var result = await _paymentService.GetPendingPayOSOrderAsync(uid, cancellationToken);
+        return Ok(new ApiResponse<CreatePayOSOrderResponse?>
+        {
+            Status = "success",
+            Message = result is null ? "No pending PayOS order." : "Pending PayOS order retrieved.",
+            Data = result
+        });
+    }
+
+    [HttpPost("payos/cancel-order/{orderCode}")]
+    public async Task<IActionResult> CancelOrder(
+        long orderCode,
+        CancellationToken cancellationToken)
+    {
+        var uid = User.GetFirebaseUid();
+        if (string.IsNullOrEmpty(uid))
+            return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
+
+        try
+        {
+            var cancelled = await _paymentService.CancelPayOSOrderAsync(
+                uid,
+                orderCode,
+                cancellationToken);
+            return Ok(new ApiResponse<bool>
+            {
+                Status = "success",
+                Message = cancelled ? "Order cancelled." : "Order was already terminal.",
+                Data = cancelled
+            });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Forbid();
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(ErrorResponse(ex.Message));
         }
     }
 
@@ -307,6 +371,7 @@ public class PaymentController : ControllerBase
             if (string.IsNullOrEmpty(uid))
                 return Unauthorized(ErrorResponse("Invalid token: User identifier not found in claims."));
 
+            await _paymentService.SyncPendingPayOSOrdersAsync(uid, cancellationToken);
             var result = await _paymentService.GetSubscriptionOverviewAsync(uid, cancellationToken);
 
             return Ok(new ApiResponse<SubscriptionOverviewResponse>
