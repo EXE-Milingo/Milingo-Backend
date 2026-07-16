@@ -226,12 +226,11 @@ public interface IFirestoreService
         string userId,
         CancellationToken cancellationToken = default);
 
-    Task<List<CardResponse>> GetDistractorCardsAsync(
+    Task<List<CardResponse>> GetDistractorPoolAsync(
         string userId,
-        string deckId,
         string targetLanguageCode,
-        IEnumerable<string> excludeCardIds,
-        int count = 3,
+        int perDeckLimit = 10,
+        int maxCandidates = 50,
         CancellationToken cancellationToken = default);
 
     Task<SubmitStudyAnswerResponse> UpdateCardSrsAsync(

@@ -245,61 +245,92 @@ public class StudyController : ControllerBase
         List<CardResponse> dueCards,
         CancellationToken cancellationToken)
     {
-        var dueCardIds = dueCards.Select(c => c.Id).ToHashSet();
-        var studyCards = new List<StudyCard>();
+        var targetLanguage = dueCards.First().TargetLangCode;
+        var candidatePool = StudyDistractorPolicy.BuildPool(
+            dueCards,
+            targetLanguage,
+            50);
 
-        foreach (var card in dueCards)
+        if (candidatePool.Count < 4)
         {
-            var suggestedMode = GetSuggestedMode(card);
-            var options = suggestedMode == "mcq"
-                ? await BuildMcqOptionsAsync(userId, card.DeckId, card, dueCardIds, cancellationToken)
-                : null;
-
-            if (suggestedMode == "mcq" && (options?.Count ?? 0) < 4)
-            {
-                suggestedMode = "flashcard";
-                options = null;
-            }
-
-            studyCards.Add(new StudyCard
-            {
-                CardId = card.Id,
-                DeckId = card.DeckId,
-                DeckName = card.DeckName,
-                Term = card.Term,
-                Translation = card.Translation,
-                Pronunciation = card.Pronunciation,
-                ImageUrl = card.ImageUrl,
-                SrsState = card.SrsState,
-                SrsRepetitions = card.SrsRepetitions,
-                SrsIntervalDays = card.SrsIntervalDays,
-                IsFirstReview = card.SrsRepetitions <= 0,
-                SuggestedMode = suggestedMode,
-                Options = options
-            });
+            var supplemental = await _firestoreService.GetDistractorPoolAsync(
+                userId,
+                targetLanguage,
+                perDeckLimit: 10,
+                maxCandidates: 50,
+                cancellationToken: cancellationToken);
+            candidatePool = StudyDistractorPolicy.BuildPool(
+                candidatePool.Concat(supplemental),
+                targetLanguage,
+                80);
         }
 
-        return studyCards;
+        using var aiConcurrency = new SemaphoreSlim(3);
+        var cardTasks = dueCards.Select(card => BuildStudyCardAsync(
+            userId,
+            card,
+            candidatePool,
+            aiConcurrency,
+            cancellationToken));
+        return (await Task.WhenAll(cardTasks)).ToList();
     }
 
     private static string GetSuggestedMode(CardResponse card) => "mcq";
 
+    private async Task<StudyCard> BuildStudyCardAsync(
+        string userId,
+        CardResponse card,
+        IReadOnlyList<CardResponse> candidatePool,
+        SemaphoreSlim aiConcurrency,
+        CancellationToken cancellationToken)
+    {
+        var suggestedMode = GetSuggestedMode(card);
+        var options = suggestedMode == "mcq"
+            ? await BuildMcqOptionsAsync(
+                userId,
+                card,
+                candidatePool,
+                aiConcurrency,
+                cancellationToken)
+            : null;
+
+        if (suggestedMode == "mcq" && (options?.Count ?? 0) < 4)
+        {
+            suggestedMode = "flashcard";
+            options = null;
+        }
+
+        return new StudyCard
+        {
+            CardId = card.Id,
+            DeckId = card.DeckId,
+            DeckName = card.DeckName,
+            Term = card.Term,
+            Translation = card.Translation,
+            Pronunciation = card.Pronunciation,
+            ImageUrl = card.ImageUrl,
+            SrsState = card.SrsState,
+            SrsRepetitions = card.SrsRepetitions,
+            SrsIntervalDays = card.SrsIntervalDays,
+            IsFirstReview = card.SrsRepetitions <= 0,
+            SuggestedMode = suggestedMode,
+            Options = options
+        };
+    }
+
     private async Task<List<StudyOption>> BuildMcqOptionsAsync(
         string userId,
-        string deckId,
         CardResponse correctCard,
-        HashSet<string> excludeIds,
+        IReadOnlyList<CardResponse> candidatePool,
+        SemaphoreSlim aiConcurrency,
         CancellationToken cancellationToken)
     {
         const int needed = 3;
 
-        var realDistractors = await _firestoreService.GetDistractorCardsAsync(
-            userId,
-            deckId,
-            correctCard.TargetLangCode,
-            excludeIds,
-            needed,
-            cancellationToken);
+        var realDistractors = StudyDistractorPolicy.SelectDistractors(
+            correctCard,
+            candidatePool,
+            needed);
 
         var usedTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -315,7 +346,12 @@ public class StudyController : ControllerBase
         if (options.Count < needed)
         {
             var aiTerms = await GetOrGenerateAiDistractorsAsync(
-                userId, deckId, correctCard, needed - options.Count, cancellationToken);
+                userId,
+                correctCard.DeckId,
+                correctCard,
+                needed - options.Count,
+                aiConcurrency,
+                cancellationToken);
 
             options.AddRange(aiTerms
                 .Where(term => usedTerms.Add(term))
@@ -342,6 +378,7 @@ public class StudyController : ControllerBase
         string deckId,
         CardResponse card,
         int countNeeded,
+        SemaphoreSlim aiConcurrency,
         CancellationToken cancellationToken)
     {
         if (card.SrsDistractors.Count >= countNeeded)
@@ -365,9 +402,21 @@ public class StudyController : ControllerBase
         List<string> distractors;
         try
         {
-            var openAiService = _serviceProvider.GetRequiredService<IOpenAiService>();
-            distractors = await openAiService.GenerateDistractorsAsync(
-                card.Term, card.Translation, targetLanguage, cancellationToken);
+            await aiConcurrency.WaitAsync(cancellationToken);
+            try
+            {
+                var openAiService =
+                    _serviceProvider.GetRequiredService<IOpenAiService>();
+                distractors = await openAiService.GenerateDistractorsAsync(
+                    card.Term,
+                    card.Translation,
+                    targetLanguage,
+                    cancellationToken);
+            }
+            finally
+            {
+                aiConcurrency.Release();
+            }
         }
         catch (InvalidOperationException ex)
         {

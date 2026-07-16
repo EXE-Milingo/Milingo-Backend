@@ -1375,67 +1375,46 @@ public class FirestoreService : IFirestoreService
     }
 
     /// <inheritdoc />
-    public async Task<List<CardResponse>> GetDistractorCardsAsync(
+    public async Task<List<CardResponse>> GetDistractorPoolAsync(
         string userId,
-        string deckId,
         string targetLanguageCode,
-        IEnumerable<string> excludeCardIds,
-        int count = 3,
+        int perDeckLimit = 10,
+        int maxCandidates = 50,
         CancellationToken cancellationToken = default)
     {
-        count = Math.Clamp(count, 1, 10);
+        perDeckLimit = Math.Clamp(perDeckLimit, 1, 50);
+        maxCandidates = Math.Clamp(maxCandidates, 1, 200);
+        var normalizedLanguage =
+            SupportedLanguages.NormalizeLanguageCode(targetLanguageCode);
+        if (normalizedLanguage.Length == 0)
+            return new List<CardResponse>();
 
-        var exclude = new HashSet<string>(excludeCardIds);
-        var result = new List<CardResponse>();
-        var usedTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var decksSnapshot = await _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks")
+            .GetSnapshotAsync(cancellationToken);
 
-        async Task AddCandidatesFromDeckAsync(string candidateDeckId, int queryLimit)
+        var deckTasks = decksSnapshot.Documents.Select(async deck =>
         {
-            var cardsSnapshot = await _db.Collection("users").Document(userId)
-                .Collection("flashcard_decks").Document(candidateDeckId)
-                .Collection("cards")
-                .Limit(queryLimit)
+            var deckName = deck.ContainsField("name")
+                ? deck.GetValue<string>("name")
+                : string.Empty;
+            var cards = await deck.Reference.Collection("cards")
+                .WhereEqualTo("target_lang_code", normalizedLanguage)
+                .Limit(perDeckLimit)
                 .GetSnapshotAsync(cancellationToken);
 
-            var candidates = cardsSnapshot.Documents
-                .Where(doc => !exclude.Contains(doc.Id))
-                .Select(doc => MapToCardResponse(doc, candidateDeckId))
-                .Where(card => !string.IsNullOrWhiteSpace(card.Term))
-                .Where(card => StudyDistractorPolicy.MatchesTargetLanguage(
-                    card.TargetLangCode,
-                    targetLanguageCode))
-                .OrderBy(_ => Guid.NewGuid());
+            return cards.Documents.Select(card =>
+                MapToCardResponse(card, deck.Id, deckName));
+        });
 
-            foreach (var candidate in candidates)
-            {
-                if (result.Count >= count)
-                    return;
+        var candidates = (await Task.WhenAll(deckTasks))
+            .SelectMany(cards => cards)
+            .OrderBy(_ => Guid.NewGuid());
 
-                if (usedTerms.Add(candidate.Term))
-                {
-                    result.Add(candidate);
-                }
-            }
-        }
-
-        await AddCandidatesFromDeckAsync(deckId, 50);
-
-        if (result.Count < count)
-        {
-            var decksSnapshot = await _db.Collection("users").Document(userId)
-                .Collection("flashcard_decks")
-                .GetSnapshotAsync(cancellationToken);
-
-            foreach (var deck in decksSnapshot.Documents.OrderBy(_ => Guid.NewGuid()))
-            {
-                if (deck.Id == deckId || result.Count >= count)
-                    continue;
-
-                await AddCandidatesFromDeckAsync(deck.Id, 20);
-            }
-        }
-
-        return result.Take(count).ToList();
+        return StudyDistractorPolicy.BuildPool(
+            candidates,
+            normalizedLanguage,
+            maxCandidates);
     }
 
     /// <inheritdoc />
