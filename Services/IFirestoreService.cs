@@ -21,6 +21,12 @@ public interface IFirestoreService
         int freeDailyLimit,
         CancellationToken cancellationToken = default);
 
+    Task<SnapHistoryPage> GetSnapHistoryAsync(
+        string userId,
+        int limit,
+        SnapHistoryCursor? cursor,
+        CancellationToken cancellationToken = default);
+
     Task<bool> SaveVocabAndAddCoinsAsync(
         string userId,
         VocabResponse vocab,

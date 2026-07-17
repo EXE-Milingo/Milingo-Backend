@@ -75,6 +75,68 @@ public class SnapController : ControllerBase
         }
     }
 
+    [HttpGet("history")]
+    public async Task<IActionResult> GetSnapHistory(
+        [FromQuery] int limit = 5,
+        [FromQuery] string? cursor = null,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var userId = User.GetFirebaseUid();
+            if (string.IsNullOrEmpty(userId))
+            {
+                return Unauthorized(new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Invalid token: User identifier not found in claims."
+                });
+            }
+
+            SnapHistoryCursor? decoded = null;
+            if (cursor is not null)
+            {
+                if (!SnapHistoryCursorCodec.TryDecode(cursor, out var parsed))
+                {
+                    return BadRequest(new ApiResponse<object>
+                    {
+                        Status = "error",
+                        Message = "Invalid scan history cursor."
+                    });
+                }
+                decoded = parsed;
+            }
+
+            var page = await _firestoreService.GetSnapHistoryAsync(
+                userId,
+                SnapHistoryCursorCodec.NormalizeLimit(limit),
+                decoded,
+                cancellationToken);
+
+            return Ok(new ApiResponse<SnapHistoryPage>
+            {
+                Status = "success",
+                Message = "Scan history retrieved successfully.",
+                Data = page
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Get scan history request cancelled: client disconnected.");
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error getting scan history.");
+            return StatusCode(StatusCodes.Status500InternalServerError,
+                new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "An unexpected error occurred while loading scan history."
+                });
+        }
+    }
+
     /// <summary>
     /// Accepts an image upload and returns YOLO segmentation/crop data only.
     /// OpenAI analysis is intentionally not called here; the client confirms
