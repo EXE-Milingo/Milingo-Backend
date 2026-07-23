@@ -1,11 +1,16 @@
 using System.Globalization;
+using System.Net.Http.Headers;
+using System.Text.Json;
+using Google.Apis.Auth.OAuth2;
 using Google.Cloud.Firestore;
+using Microsoft.AspNetCore.Hosting;
 using Milingo.Backend.Models;
 
 namespace Milingo.Backend.Services;
 
 public class AdminAnalyticsService : IAdminAnalyticsService
 {
+    private const string AndroidPublisherScope = "https://www.googleapis.com/auth/androidpublisher";
     private static readonly HashSet<string> PaidStatuses = new(StringComparer.OrdinalIgnoreCase)
     {
         "PAID",
@@ -14,16 +19,22 @@ public class AdminAnalyticsService : IAdminAnalyticsService
     };
 
     private readonly FirestoreDb _db;
+    private readonly HttpClient _httpClient;
     private readonly IConfiguration _configuration;
+    private readonly IWebHostEnvironment _environment;
     private readonly ILogger<AdminAnalyticsService> _logger;
 
     public AdminAnalyticsService(
         FirestoreDb db,
+        HttpClient httpClient,
         IConfiguration configuration,
+        IWebHostEnvironment environment,
         ILogger<AdminAnalyticsService> logger)
     {
         _db = db;
+        _httpClient = httpClient;
         _configuration = configuration;
+        _environment = environment;
         _logger = logger;
     }
 
@@ -33,6 +44,8 @@ public class AdminAnalyticsService : IAdminAnalyticsService
         DateTime? to,
         CancellationToken cancellationToken = default)
     {
+        await SyncGooglePlayReviewsAsync(cancellationToken);
+
         var normalizedGranularity = NormalizeGranularity(granularity);
         var fromUtc = NormalizeStart(from);
         var toUtc = NormalizeEnd(to);
@@ -90,6 +103,173 @@ public class AdminAnalyticsService : IAdminAnalyticsService
         };
     }
 
+    private async Task SyncGooglePlayReviewsAsync(CancellationToken cancellationToken)
+    {
+        var packageName = _configuration["Google:PackageName"]?.Trim();
+        if (string.IsNullOrWhiteSpace(packageName))
+            return;
+
+        var serviceAccountValue = _configuration["Google:ServiceAccountJson"]?.Trim();
+        if (string.IsNullOrWhiteSpace(serviceAccountValue))
+            serviceAccountValue = _configuration["Firebase:ServiceAccountKeyPath"]?.Trim();
+        serviceAccountValue = string.IsNullOrWhiteSpace(serviceAccountValue)
+            ? "firebase-key.json"
+            : serviceAccountValue;
+
+        try
+        {
+            var accessToken = await GetGoogleAccessTokenAsync(serviceAccountValue, cancellationToken);
+            // ponytail: one 100-review page fits current volume; add tokenPagination when it exceeds 100.
+            var url = "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+                + Uri.EscapeDataString(packageName)
+                + "/reviews?maxResults=100";
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Google Play review sync failed with HTTP {StatusCode}.",
+                    response.StatusCode);
+                return;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var payload = await JsonDocument.ParseAsync(
+                stream,
+                cancellationToken: cancellationToken);
+            if (!payload.RootElement.TryGetProperty("reviews", out var reviews)
+                || reviews.ValueKind != JsonValueKind.Array)
+            {
+                return;
+            }
+
+            var batch = _db.StartBatch();
+            var synced = 0;
+            foreach (var reviewElement in reviews.EnumerateArray())
+            {
+                var review = ParseGooglePlayReview(reviewElement);
+                if (review is null)
+                    continue;
+
+                var document = _db.Collection("app_reviews")
+                    .Document(Uri.EscapeDataString(review.Id));
+                batch.Set(document, new Dictionary<string, object>
+                {
+                    ["uid"] = string.Empty,
+                    ["reviewId"] = review.Id,
+                    ["author"] = review.Author,
+                    ["authorName"] = review.Author,
+                    ["rating"] = review.Rating,
+                    ["comment"] = review.Text,
+                    ["createdAt"] = Timestamp.FromDateTime(review.LastModified),
+                    ["updatedAt"] = Timestamp.FromDateTime(review.LastModified),
+                    ["appVersion"] = review.AppVersion,
+                    ["source"] = "Google Play",
+                    ["platform"] = "android",
+                    ["replied"] = review.Replied
+                }, SetOptions.MergeAll);
+                synced++;
+            }
+
+            if (synced > 0)
+            {
+                await batch.CommitAsync(cancellationToken);
+                _logger.LogInformation("Synced {ReviewCount} Google Play reviews.", synced);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Google Play review sync failed; using cached Firestore reviews.");
+        }
+    }
+
+    private async Task<string> GetGoogleAccessTokenAsync(
+        string serviceAccountValue,
+        CancellationToken cancellationToken)
+    {
+        var serviceAccountJson = serviceAccountValue.TrimStart().StartsWith('{')
+            ? serviceAccountValue
+            : File.ReadAllText(Path.IsPathRooted(serviceAccountValue)
+                ? serviceAccountValue
+                : Path.Combine(_environment.ContentRootPath, serviceAccountValue));
+
+        var credential = CredentialFactory
+            .FromJson<ServiceAccountCredential>(serviceAccountJson)
+            .ToGoogleCredential()
+            .CreateScoped(AndroidPublisherScope);
+
+        return await ((ITokenAccess)credential)
+            .GetAccessTokenForRequestAsync(cancellationToken: cancellationToken);
+    }
+
+    private static GooglePlayReviewRecord? ParseGooglePlayReview(JsonElement review)
+    {
+        var reviewId = GetJsonString(review, "reviewId");
+        if (string.IsNullOrWhiteSpace(reviewId)
+            || !review.TryGetProperty("comments", out var comments)
+            || comments.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        JsonElement userComment = default;
+        var replied = false;
+        foreach (var comment in comments.EnumerateArray())
+        {
+            if (comment.TryGetProperty("userComment", out var nextUserComment))
+                userComment = nextUserComment;
+            if (comment.TryGetProperty("developerComment", out _))
+                replied = true;
+        }
+
+        if (userComment.ValueKind != JsonValueKind.Object
+            || !userComment.TryGetProperty("starRating", out var ratingElement)
+            || !ratingElement.TryGetInt32(out var rating)
+            || rating is < 1 or > 5)
+        {
+            return null;
+        }
+
+        return new GooglePlayReviewRecord(
+            reviewId,
+            GetJsonString(review, "authorName"),
+            rating,
+            GetJsonString(userComment, "text"),
+            GetJsonString(userComment, "appVersionName"),
+            GetGoogleTimestamp(userComment),
+            replied);
+    }
+
+    private static string GetJsonString(JsonElement element, string propertyName)
+    {
+        if (!element.TryGetProperty(propertyName, out var value))
+            return string.Empty;
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? string.Empty
+            : value.ToString();
+    }
+
+    private static DateTime GetGoogleTimestamp(JsonElement userComment)
+    {
+        if (userComment.TryGetProperty("lastModified", out var timestamp)
+            && long.TryParse(
+                GetJsonString(timestamp, "seconds"),
+                NumberStyles.Integer,
+                CultureInfo.InvariantCulture,
+                out var seconds))
+        {
+            return DateTimeOffset.FromUnixTimeSeconds(seconds).UtcDateTime;
+        }
+
+        return DateTime.UtcNow;
+    }
     private async Task<List<AdminUserRecord>> LoadUsersAsync(
         HashSet<string> adminEmails,
         DateTime? fromUtc,
@@ -423,6 +603,15 @@ public class AdminAnalyticsService : IAdminAnalyticsService
         string Status,
         string Source,
         DateTime? PaidAt);
+
+    private sealed record GooglePlayReviewRecord(
+        string Id,
+        string Author,
+        int Rating,
+        string Text,
+        string AppVersion,
+        DateTime LastModified,
+        bool Replied);
 
     private sealed record AdminReviewRecord(
         string Id,
