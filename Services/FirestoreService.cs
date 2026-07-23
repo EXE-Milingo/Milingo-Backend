@@ -120,6 +120,49 @@ public class FirestoreService : IFirestoreService
             quotaClock.ResetAtUtc);
     }
 
+    /// <inheritdoc />
+    public async Task<SnapHistoryPage> GetSnapHistoryAsync(
+        string userId,
+        int limit,
+        SnapHistoryCursor? cursor,
+        CancellationToken cancellationToken = default)
+    {
+        var pageSize = SnapHistoryCursorCodec.NormalizeLimit(limit);
+        var vocabCollection = _db.Collection("users").Document(userId)
+            .Collection("vocabularies");
+        Query query = vocabCollection
+            .OrderByDescending("created_at")
+            .OrderByDescending(FieldPath.DocumentId);
+
+        if (cursor is not null)
+        {
+            query = query.StartAfter(
+                Timestamp.FromDateTime(DateTime.SpecifyKind(
+                    cursor.CreatedAt.ToUniversalTime(),
+                    DateTimeKind.Utc)),
+                vocabCollection.Document(cursor.DocumentId));
+        }
+
+        var snapshot = await query
+            .Limit(pageSize + 1)
+            .GetSnapshotAsync(cancellationToken);
+        var hasMore = snapshot.Documents.Count > pageSize;
+        var visible = snapshot.Documents.Take(pageSize).ToList();
+        var items = visible.Select(MapToSnapHistoryItem).ToList();
+        var last = visible.LastOrDefault();
+
+        return new SnapHistoryPage
+        {
+            Items = items,
+            HasMore = hasMore,
+            NextCursor = hasMore && last is not null
+                ? SnapHistoryCursorCodec.Encode(new SnapHistoryCursor(
+                    last.GetValue<Timestamp>("created_at").ToDateTime(),
+                    last.Id))
+                : null
+        };
+    }
+
     // =================================================================
     //  AI TUTOR CHAT QUOTA
     // =================================================================
@@ -1375,63 +1418,46 @@ public class FirestoreService : IFirestoreService
     }
 
     /// <inheritdoc />
-    public async Task<List<CardResponse>> GetDistractorCardsAsync(
+    public async Task<List<CardResponse>> GetDistractorPoolAsync(
         string userId,
-        string deckId,
-        IEnumerable<string> excludeCardIds,
-        int count = 3,
+        string targetLanguageCode,
+        int perDeckLimit = 10,
+        int maxCandidates = 50,
         CancellationToken cancellationToken = default)
     {
-        count = Math.Clamp(count, 1, 10);
+        perDeckLimit = Math.Clamp(perDeckLimit, 1, 50);
+        maxCandidates = Math.Clamp(maxCandidates, 1, 200);
+        var normalizedLanguage =
+            SupportedLanguages.NormalizeLanguageCode(targetLanguageCode);
+        if (normalizedLanguage.Length == 0)
+            return new List<CardResponse>();
 
-        var exclude = new HashSet<string>(excludeCardIds);
-        var result = new List<CardResponse>();
-        var usedTerms = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var decksSnapshot = await _db.Collection("users").Document(userId)
+            .Collection("flashcard_decks")
+            .GetSnapshotAsync(cancellationToken);
 
-        async Task AddCandidatesFromDeckAsync(string candidateDeckId, int queryLimit)
+        var deckTasks = decksSnapshot.Documents.Select(async deck =>
         {
-            var cardsSnapshot = await _db.Collection("users").Document(userId)
-                .Collection("flashcard_decks").Document(candidateDeckId)
-                .Collection("cards")
-                .Limit(queryLimit)
+            var deckName = deck.ContainsField("name")
+                ? deck.GetValue<string>("name")
+                : string.Empty;
+            var cards = await deck.Reference.Collection("cards")
+                .WhereEqualTo("target_lang_code", normalizedLanguage)
+                .Limit(perDeckLimit)
                 .GetSnapshotAsync(cancellationToken);
 
-            var candidates = cardsSnapshot.Documents
-                .Where(doc => !exclude.Contains(doc.Id))
-                .Select(doc => MapToCardResponse(doc, candidateDeckId))
-                .Where(card => !string.IsNullOrWhiteSpace(card.Term))
-                .OrderBy(_ => Guid.NewGuid());
+            return cards.Documents.Select(card =>
+                MapToCardResponse(card, deck.Id, deckName));
+        });
 
-            foreach (var candidate in candidates)
-            {
-                if (result.Count >= count)
-                    return;
+        var candidates = (await Task.WhenAll(deckTasks))
+            .SelectMany(cards => cards)
+            .OrderBy(_ => Guid.NewGuid());
 
-                if (usedTerms.Add(candidate.Term))
-                {
-                    result.Add(candidate);
-                }
-            }
-        }
-
-        await AddCandidatesFromDeckAsync(deckId, 50);
-
-        if (result.Count < count)
-        {
-            var decksSnapshot = await _db.Collection("users").Document(userId)
-                .Collection("flashcard_decks")
-                .GetSnapshotAsync(cancellationToken);
-
-            foreach (var deck in decksSnapshot.Documents.OrderBy(_ => Guid.NewGuid()))
-            {
-                if (deck.Id == deckId || result.Count >= count)
-                    continue;
-
-                await AddCandidatesFromDeckAsync(deck.Id, 20);
-            }
-        }
-
-        return result.Take(count).ToList();
+        return StudyDistractorPolicy.BuildPool(
+            candidates,
+            normalizedLanguage,
+            maxCandidates);
     }
 
     /// <inheritdoc />
@@ -1861,6 +1887,46 @@ public class FirestoreService : IFirestoreService
             IsPremium = isPremiumFlag
                 && expiresAt.HasValue
                 && expiresAt.Value > DateTime.UtcNow
+        };
+    }
+
+    private static SnapHistoryItem MapToSnapHistoryItem(DocumentSnapshot document)
+    {
+        var relatedWords = new List<RelatedWordResponse>();
+        if (document.ContainsField("related_words"))
+        {
+            var rawWords = document.GetValue<List<Dictionary<string, object>>>(
+                "related_words");
+            relatedWords = rawWords.Select(word => new RelatedWordResponse
+            {
+                Keyword = word.TryGetValue("keyword", out var keyword)
+                    ? keyword?.ToString() ?? string.Empty
+                    : string.Empty,
+                Translation = word.TryGetValue("translation", out var translation)
+                    ? translation?.ToString() ?? string.Empty
+                    : string.Empty,
+                Pronunciation = word.TryGetValue("pronunciation", out var pronunciation)
+                    ? pronunciation?.ToString() ?? string.Empty
+                    : string.Empty
+            }).ToList();
+        }
+
+        var createdAt = document.ContainsField("created_at")
+            ? document.GetValue<Timestamp>("created_at").ToDateTime().ToUniversalTime()
+            : DateTime.UnixEpoch;
+
+        return new SnapHistoryItem
+        {
+            Id = document.Id,
+            SnapGroupId = document.ContainsField("snap_group_id")
+                ? document.GetValue<string>("snap_group_id")
+                : null,
+            Keyword = GetString(document, "keyword"),
+            Translation = GetString(document, "translation"),
+            Pronunciation = GetString(document, "pronunciation"),
+            ExampleSentence = GetString(document, "example_sentence"),
+            RelatedWords = relatedWords,
+            CreatedAt = createdAt
         };
     }
 

@@ -21,6 +21,12 @@ public interface IFirestoreService
         int freeDailyLimit,
         CancellationToken cancellationToken = default);
 
+    Task<SnapHistoryPage> GetSnapHistoryAsync(
+        string userId,
+        int limit,
+        SnapHistoryCursor? cursor,
+        CancellationToken cancellationToken = default);
+
     Task<bool> SaveVocabAndAddCoinsAsync(
         string userId,
         VocabResponse vocab,
@@ -226,11 +232,11 @@ public interface IFirestoreService
         string userId,
         CancellationToken cancellationToken = default);
 
-    Task<List<CardResponse>> GetDistractorCardsAsync(
+    Task<List<CardResponse>> GetDistractorPoolAsync(
         string userId,
-        string deckId,
-        IEnumerable<string> excludeCardIds,
-        int count = 3,
+        string targetLanguageCode,
+        int perDeckLimit = 10,
+        int maxCandidates = 50,
         CancellationToken cancellationToken = default);
 
     Task<SubmitStudyAnswerResponse> UpdateCardSrsAsync(

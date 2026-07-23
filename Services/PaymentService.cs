@@ -73,6 +73,8 @@ public class PaymentService : IPaymentService
         var cancelUrl = GetRequiredConfig("PayOS:CancelUrl");
         var amount = GetPlanAmount(planId);
         var normalizedPlanId = NormalizePlanId(planId);
+        var durationDays = GetConfiguredPlanDurationDays(
+            GetPaymentPlan(normalizedPlanId));
         var reusableOrder = await ResolveExistingOrderAsync(
             uid,
             normalizedPlanId,
@@ -83,7 +85,6 @@ public class PaymentService : IPaymentService
         }
 
         var orderCode = GenerateOrderCode();
-        var premiumExpiresAt = GetPremiumExpiresAt(normalizedPlanId);
         var orderExpiryMinutes = Math.Clamp(
             _configuration.GetValue<int?>("PayOS:OrderExpiryMinutes") ?? 30,
             5,
@@ -148,7 +149,7 @@ public class PaymentService : IPaymentService
             result.PaymentLinkId,
             result.CheckoutUrl,
             result,
-            premiumExpiresAt,
+            durationDays,
             cancellationToken);
 
         _logger.LogInformation(
@@ -299,17 +300,19 @@ public class PaymentService : IPaymentService
             return false;
         }
 
-        await _firestoreService.SetPremiumAsync(
+        var application = await ApplyPaidPayOSOrderAsync(
+            payload.Data.OrderCode,
             order.Uid,
-            order.PremiumExpiresAt,
-            "payos",
+            payload.Data.Amount,
+            DateTime.UtcNow,
             cancellationToken);
 
-        await MarkPayOSOrderStatusAsync(payload.Data.OrderCode, "PAID", cancellationToken);
-
         _logger.LogInformation(
-            "PayOS order {OrderCode} marked paid. Premium granted to user '{Uid}' until {ExpiresAt:o}.",
-            payload.Data.OrderCode, order.Uid, order.PremiumExpiresAt);
+            "PayOS order {OrderCode} entitlement applied={Applied} for user '{Uid}' until {ExpiresAt:o}.",
+            payload.Data.OrderCode,
+            application.Applied,
+            order.Uid,
+            application.ExpiresAtUtc);
 
         return true;
     }
@@ -377,17 +380,12 @@ public class PaymentService : IPaymentService
                 : payload.Data.Status.ToUpperInvariant();
             if (IsPaidStatus(payosStatus))
             {
-                var premiumExpiresAt = snapshot.ContainsField("premiumExpiresAt")
-                    ? snapshot.GetValue<Timestamp>("premiumExpiresAt").ToDateTime()
-                    : GetPremiumExpiresAt(snapshot.ContainsField("planId")
-                        ? snapshot.GetValue<string>("planId")
-                        : "monthly");
-                await _firestoreService.SetPremiumAsync(
+                await ApplyPaidPayOSOrderAsync(
+                    orderCode,
                     uid,
-                    premiumExpiresAt,
-                    "payos",
+                    payload.Data.Amount,
+                    DateTime.UtcNow,
                     cancellationToken);
-                await MarkPayOSOrderStatusAsync(orderCode, "PAID", cancellationToken);
                 return BuildOrderStatus(orderCode, "PAID", orderExpiresAt);
             }
 
@@ -761,13 +759,11 @@ public class PaymentService : IPaymentService
         string paymentLinkId,
         string checkoutUrl,
         CreatePayOSOrderResponse payment,
-        DateTime premiumExpiresAt,
+        int durationDays,
         CancellationToken cancellationToken)
     {
         var orderRef = _db.Collection("payment_orders")
             .Document(orderCode.ToString(CultureInfo.InvariantCulture));
-        var expiresAtUtc = DateTime.SpecifyKind(premiumExpiresAt.ToUniversalTime(), DateTimeKind.Utc);
-
         await orderRef.SetAsync(new Dictionary<string, object>
         {
             { "uid", uid },
@@ -786,7 +782,7 @@ public class PaymentService : IPaymentService
                 payment.ExpiresAt.ToUniversalTime(),
                 DateTimeKind.Utc)) },
             { "status", "PENDING" },
-            { "premiumExpiresAt", Timestamp.FromDateTime(expiresAtUtc) },
+            { "durationDays", durationDays },
             { "source", "payos" },
             { "createdAt", FieldValue.ServerTimestamp },
             { "updatedAt", FieldValue.ServerTimestamp }
@@ -807,12 +803,111 @@ public class PaymentService : IPaymentService
         return new PayOSOrderRecord(
             snapshot.GetValue<string>("uid"),
             snapshot.ContainsField("amount") ? snapshot.GetValue<int>("amount") : 0,
-            snapshot.ContainsField("status") ? snapshot.GetValue<string>("status") : "PENDING",
-            snapshot.ContainsField("premiumExpiresAt")
-                ? snapshot.GetValue<Timestamp>("premiumExpiresAt").ToDateTime()
-                : GetPremiumExpiresAt(snapshot.ContainsField("planId")
-                    ? snapshot.GetValue<string>("planId")
-                    : "monthly"));
+            snapshot.ContainsField("status") ? snapshot.GetValue<string>("status") : "PENDING");
+    }
+
+    private Task<PayOSEntitlementApplication> ApplyPaidPayOSOrderAsync(
+        long orderCode,
+        string? expectedUid,
+        int expectedAmount,
+        DateTime confirmedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        var orderRef = _db.Collection("payment_orders")
+            .Document(orderCode.ToString(CultureInfo.InvariantCulture));
+
+        return _db.RunTransactionAsync(async transaction =>
+        {
+            var orderSnapshot = await transaction.GetSnapshotAsync(
+                orderRef,
+                cancellationToken);
+            if (!orderSnapshot.Exists)
+            {
+                throw new KeyNotFoundException(
+                    $"Payment order {orderCode} was not found.");
+            }
+
+            var orderData = orderSnapshot.ToDictionary();
+            var ownerUid = GetString(orderData, "uid", string.Empty);
+            if (string.IsNullOrWhiteSpace(ownerUid))
+            {
+                throw new InvalidOperationException(
+                    $"Payment order {orderCode} has no owner.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(expectedUid)
+                && !string.Equals(ownerUid, expectedUid, StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException(
+                    "The payment order belongs to another user.");
+            }
+
+            var amount = GetInt(orderData, "amount");
+            if (amount != expectedAmount)
+            {
+                throw new InvalidOperationException(
+                    $"Payment amount mismatch for order {orderCode}.");
+            }
+
+            var status = GetString(orderData, "status", "PENDING");
+            if (IsPaidStatus(status))
+            {
+                return new PayOSEntitlementApplication(
+                    false,
+                    GetDateTime(orderData, "grantedPremiumExpiresAt"));
+            }
+
+            var planId = GetString(orderData, "planId", string.Empty);
+            var storedDuration = GetInt(orderData, "durationDays");
+            var durationDays = storedDuration > 0
+                ? storedDuration
+                : GetConfiguredPlanDurationDays(GetPaymentPlan(planId));
+
+            var userRef = _db.Collection("users").Document(ownerUid);
+            var userSnapshot = await transaction.GetSnapshotAsync(
+                userRef,
+                cancellationToken);
+            var currentExpiry = userSnapshot.Exists
+                ? GetDateTime(
+                    userSnapshot.ToDictionary(),
+                    "premiumExpiresAt")
+                : null;
+            var decision = PremiumRenewalPolicy.Decide(
+                status,
+                confirmedAtUtc,
+                currentExpiry,
+                durationDays);
+            var newExpiry = decision.NewExpiryUtc
+                ?? throw new InvalidOperationException(
+                    $"Order {orderCode} has no Premium grant result.");
+            var expiryTimestamp = Timestamp.FromDateTime(
+                DateTime.SpecifyKind(newExpiry, DateTimeKind.Utc));
+
+            transaction.Set(
+                userRef,
+                new Dictionary<string, object>
+                {
+                    { "isPremium", true },
+                    { "premiumExpiresAt", expiryTimestamp },
+                    { "premiumSource", "payos" },
+                    { "updatedAt", FieldValue.ServerTimestamp }
+                },
+                SetOptions.MergeAll);
+            transaction.Set(
+                orderRef,
+                new Dictionary<string, object>
+                {
+                    { "status", "PAID" },
+                    { "durationDays", durationDays },
+                    { "paidAt", FieldValue.ServerTimestamp },
+                    { "entitlementAppliedAt", FieldValue.ServerTimestamp },
+                    { "grantedPremiumExpiresAt", expiryTimestamp },
+                    { "updatedAt", FieldValue.ServerTimestamp }
+                },
+                SetOptions.MergeAll);
+
+            return new PayOSEntitlementApplication(true, newExpiry);
+        }, cancellationToken: cancellationToken);
     }
 
     private async Task MarkPayOSOrderStatusAsync(
@@ -940,12 +1035,6 @@ public class PaymentService : IPaymentService
         {
             return null;
         }
-    }
-
-    private DateTime GetPremiumExpiresAt(string planId)
-    {
-        var durationDays = GetConfiguredPlanDurationDays(GetPaymentPlan(planId));
-        return DateTime.UtcNow.AddDays(durationDays);
     }
 
     private PaymentPlanDefinition GetPaymentPlan(string planId)
@@ -1276,8 +1365,11 @@ public class PaymentService : IPaymentService
     private sealed record PayOSOrderRecord(
         string Uid,
         int Amount,
-        string Status,
-        DateTime PremiumExpiresAt);
+        string Status);
+
+    private sealed record PayOSEntitlementApplication(
+        bool Applied,
+        DateTime? ExpiresAtUtc);
 
     private sealed record PaymentPlanDefinition(
         string Id,
