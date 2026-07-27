@@ -10,11 +10,13 @@
     <PackageReference Include="FirebaseAdmin" Version="3.5.0" />
     <PackageReference Include="Google.Cloud.Firestore" Version="4.2.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.0" />
-    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="8.0.0" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Milingo.Backend.Tests\**\*.cs" />
+    <Content Remove="Milingo.Backend.Tests\**\*" />
+    <EmbeddedResource Remove="Milingo.Backend.Tests\**\*" />
+    <None Remove="Milingo.Backend.Tests\**\*" />
   </ItemGroup>
   <ItemGroup>
     <None Update="firebase-key.json">
