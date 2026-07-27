@@ -3,4 +3,8 @@ Milingo.Backend/.env
 bin
 obj
 .vs
-
+*.user
+swagger-check.json
+firebase-key.json
+AGENT_CONTEXT.md
+.hatch-pet-runs/

@@ -1,6 +1,90 @@
-@Milingo.Backend_HostAddress = http://localhost:5098
+@host = http://localhost:5098
+@yolo_host = http://localhost:8000
+@token = Bearer YOUR_FIREBASE_JWT_HERE
 
-GET {{Milingo.Backend_HostAddress}}/weatherforecast/
-Accept: application/json
+### ================================================================
+###  SNAP & LEARN — Image Analysis (multi-object detection)
+### ================================================================
 
-###
+### Analyze an image (normal flow: YOLO + OpenAI)
+# @name analyzeSnap
+POST {{host}}/api/v1/snap/analyze
+Authorization: {{token}}
+Idempotency-Key: {{$guid}}
+Content-Type: multipart/form-data; boundary=----formdata
+
+------formdata
+Content-Disposition: form-data; name="image"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+< ./test-images/photo.jpg
+------formdata--
+
+### Duplicate request (same Idempotency-Key — should return cached result, no coins)
+POST {{host}}/api/v1/snap/analyze
+Authorization: {{token}}
+Idempotency-Key: 550e8400-e29b-41d4-a716-446655440000
+Content-Type: multipart/form-data; boundary=----formdata
+
+------formdata
+Content-Disposition: form-data; name="image"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+< ./test-images/photo.jpg
+------formdata--
+
+### Missing Idempotency-Key (should return 400)
+POST {{host}}/api/v1/snap/analyze
+Authorization: {{token}}
+Content-Type: multipart/form-data; boundary=----formdata
+
+------formdata
+Content-Disposition: form-data; name="image"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+< ./test-images/photo.jpg
+------formdata--
+
+### Missing auth token (should return 401)
+POST {{host}}/api/v1/snap/analyze
+Idempotency-Key: {{$guid}}
+Content-Type: multipart/form-data; boundary=----formdata
+
+------formdata
+Content-Disposition: form-data; name="image"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+< ./test-images/photo.jpg
+------formdata--
+
+### ================================================================
+###  YOLO SERVICE — Direct detection test
+### ================================================================
+
+### Health check
+GET {{yolo_host}}/health
+
+### Detect objects in an image
+POST {{yolo_host}}/detect?confidence_threshold=0.5&max_objects=3
+Content-Type: multipart/form-data; boundary=----formdata
+
+------formdata
+Content-Disposition: form-data; name="file"; filename="photo.jpg"
+Content-Type: image/jpeg
+
+< ./test-images/photo.jpg
+------formdata--
+
+### ================================================================
+###  USER PROFILE — Init profile
+### ================================================================
+
+### Initialize user profile
+POST {{host}}/api/v1/users/init-profile
+Authorization: {{token}}
+Content-Type: application/json
+
+{
+    "displayName": "Test User",
+    "targetLanguage": "vi"
+}

@@ -1,0 +1,133 @@
+<style>
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(320px, .9fr); gap: 18px; }
+  .panel { border: 1px solid #d9e2ec; border-radius: 8px; background: #fff; padding: 18px; }
+  .flow { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; align-items: stretch; }
+  .step { border: 1px solid #dbe6df; background: #f8fbf8; border-radius: 8px; padding: 12px; min-height: 104px; }
+  .step b { display: block; font-size: 13px; color: #0f513f; margin-bottom: 8px; }
+  .step span { display: block; font-size: 12px; line-height: 1.45; color: #43524a; }
+  .dash { display: grid; gap: 12px; }
+  .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .kpi { border: 1px solid #e1e8ee; border-radius: 8px; padding: 12px; background: #fbfcfd; }
+  .kpi small { color: #6b7785; font-size: 11px; }
+  .kpi strong { display: block; margin-top: 8px; font-size: 21px; color: #111827; }
+  .charts { display: grid; grid-template-columns: 1.45fr .55fr; gap: 12px; }
+  .chart { border: 1px solid #e1e8ee; border-radius: 8px; background: #fbfcfd; padding: 12px; min-height: 170px; }
+  .bars { display: flex; align-items: end; gap: 8px; height: 108px; margin-top: 18px; }
+  .bar { flex: 1; border-radius: 5px 5px 0 0; background: #0f766e; min-height: 18px; }
+  .pie { width: 112px; height: 112px; margin: 16px auto 8px; border-radius: 999px; background: conic-gradient(#0f766e 0 55%, #14b8a6 55% 78%, #f59e0b 78% 92%, #e11d48 92% 100%); }
+  .legend { display: grid; gap: 6px; font-size: 12px; color: #52616b; }
+  .dot { display: inline-block; width: 9px; height: 9px; border-radius: 999px; margin-right: 6px; }
+  .table { border: 1px solid #e1e8ee; border-radius: 8px; overflow: hidden; font-size: 12px; }
+  .row { display: grid; grid-template-columns: 1fr .8fr .8fr .7fr; gap: 8px; padding: 9px 11px; border-top: 1px solid #edf2f6; color: #475569; }
+  .row:first-child { border-top: 0; background: #f3f7f5; font-weight: 700; color: #1f2937; }
+  .badge { display: inline-flex; align-items: center; width: fit-content; border-radius: 8px; background: #dcfce7; color: #166534; padding: 2px 8px; font-weight: 700; }
+  .choice-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 18px; }
+  .choice-card { border: 1px solid #d9e2ec; border-radius: 8px; padding: 15px; cursor: pointer; background: #fff; }
+  .choice-card:hover { border-color: #0f766e; box-shadow: 0 10px 28px rgba(15, 118, 110, .12); }
+  .choice-card h3 { margin: 0 0 8px; font-size: 16px; }
+  .choice-card p { margin: 0; font-size: 13px; line-height: 1.55; color: #53606b; }
+  .recommended { border-color: #0f766e; background: #f0fdfa; }
+  @media (max-width: 900px) {
+    .grid2, .charts, .choice-grid { grid-template-columns: 1fr; }
+    .flow, .kpis { grid-template-columns: repeat(2, 1fr); }
+  }
+</style>
+
+<h2>MiLingo Admin - Payment detection and metrics dashboard</h2>
+<p class="subtitle">Màn này show luồng PayOS hiện tại và 3 hướng lấy dữ liệu cho dashboard doanh thu, user, giao dịch, review.</p>
+
+<div class="section panel">
+  <h3>PayOS detect hiện tại</h3>
+  <div class="flow">
+    <div class="step">
+      <b>1. User chọn gói</b>
+      <span>Mobile gọi backend tạo PayOS order. Backend lưu `payment_orders` status `PENDING`.</span>
+    </div>
+    <div class="step">
+      <b>2. PayOS checkout</b>
+      <span>User thanh toán trên PayOS bằng link checkout.</span>
+    </div>
+    <div class="step">
+      <b>3. Webhook về BE</b>
+      <span>PayOS gọi `api/v1/payments/payos/webhook` khi có trạng thái thanh toán.</span>
+    </div>
+    <div class="step">
+      <b>4. BE verify</b>
+      <span>Backend check HMAC signature, check amount, rồi set `status = PAID`.</span>
+    </div>
+    <div class="step">
+      <b>5. Admin đọc số liệu</b>
+      <span>Dashboard tổng hợp từ `payment_orders`, `users`, và collection review.</span>
+    </div>
+  </div>
+</div>
+
+<div class="grid2 section">
+  <div class="panel dash">
+    <h3>Dashboard đề xuất</h3>
+    <div class="kpis">
+      <div class="kpi"><small>Doanh thu</small><strong>12.4M đ</strong></div>
+      <div class="kpi"><small>Người dùng</small><strong>24</strong></div>
+      <div class="kpi"><small>Giao dịch</small><strong>38</strong></div>
+      <div class="kpi"><small>Review bình quân</small><strong>4.3</strong></div>
+    </div>
+    <div class="charts">
+      <div class="chart">
+        <b>Tăng trưởng theo ngày, tháng, năm</b>
+        <div class="bars">
+          <div class="bar" style="height: 38%"></div>
+          <div class="bar" style="height: 58%"></div>
+          <div class="bar" style="height: 46%"></div>
+          <div class="bar" style="height: 76%"></div>
+          <div class="bar" style="height: 64%"></div>
+          <div class="bar" style="height: 88%"></div>
+          <div class="bar" style="height: 70%"></div>
+        </div>
+      </div>
+      <div class="chart">
+        <b>Review 3, 4, 5 sao</b>
+        <div class="pie"></div>
+        <div class="legend">
+          <span><i class="dot" style="background:#0f766e"></i>5 sao</span>
+          <span><i class="dot" style="background:#14b8a6"></i>4 sao</span>
+          <span><i class="dot" style="background:#f59e0b"></i>3 sao</span>
+        </div>
+      </div>
+    </div>
+    <div class="table">
+      <div class="row"><span>User</span><span>Gói</span><span>Số tiền</span><span>Trạng thái</span></div>
+      <div class="row"><span>mai@email.com</span><span>Pro</span><span>299K</span><span class="badge">PAID</span></div>
+      <div class="row"><span>khanh@email.com</span><span>Plus</span><span>99K</span><span class="badge">PAID</span></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Dữ liệu cần có</h3>
+    <p class="subtitle">Review app hiện chưa thấy model/API trong backend. Cần quyết định lấy từ collection nào hoặc tạo collection mới.</p>
+    <div class="options">
+      <div class="option" data-choice="reviews-new" onclick="toggleSelect(this)">
+        <div class="letter">R</div>
+        <div class="content">
+          <h3>Tạo collection `app_reviews`</h3>
+          <p>User gửi rating 1-5 và comment. Admin tính 3, 4, 5 sao + điểm bình quân.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<h3>Chọn hướng lấy dữ liệu dashboard</h3>
+<div class="choice-grid">
+  <div class="choice-card" data-choice="frontend-firestore" onclick="toggleSelect(this)">
+    <h3>A. Admin đọc Firestore trực tiếp</h3>
+    <p>Nhanh, ít code backend. Nhưng rules dễ lộ dữ liệu nếu admin role chưa chặt.</p>
+  </div>
+  <div class="choice-card recommended" data-choice="backend-admin-api" onclick="toggleSelect(this)">
+    <h3>B. Backend Admin API</h3>
+    <p>Đề xuất. Backend tổng hợp số liệu, admin chỉ gọi 1 endpoint. Dễ bảo vệ bằng Firebase custom claim `admin`.</p>
+  </div>
+  <div class="choice-card" data-choice="hybrid" onclick="toggleSelect(this)">
+    <h3>C. Hybrid</h3>
+    <p>Dashboard summary từ backend, bảng gần realtime từ Firestore. Linh hoạt nhưng nhiều logic hơn.</p>
+  </div>
+</div>
