@@ -83,8 +83,6 @@ builder.Services.AddScoped<IFirestoreService, FirestoreService>();
 builder.Services.AddHttpClient<IAdminAnalyticsService, AdminAnalyticsService>();
 builder.Services.AddHostedService<GooglePlayReviewSyncWorker>();
 
-// GeminiService disabled: requests now use OpenAiService.
-// builder.Services.AddHttpClient<IGeminiService, GeminiService>(...);
 builder.Services.AddHttpClient<IOpenAiService, OpenAiService>(client =>
 {
     var timeoutSeconds = builder.Configuration.GetValue<int>("OpenAI:TimeoutSeconds", 30);

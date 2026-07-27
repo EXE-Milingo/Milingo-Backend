@@ -4,7 +4,13 @@ bin
 obj
 .vs
 *.user
+*.log
+*.lscache
 swagger-check.json
 firebase-key.json
 AGENT_CONTEXT.md
 .hatch-pet-runs/
+.omx/
+.superpowers/
+.tmp/
+docs/superpowers/

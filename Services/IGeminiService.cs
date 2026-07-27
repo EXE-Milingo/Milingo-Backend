@@ -1,5 +1,0 @@
-/*
-IGeminiService disabled.
-
-Use IOpenAiService for image vocabulary analysis.
-*/
