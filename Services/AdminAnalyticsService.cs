@@ -103,11 +103,41 @@ public class AdminAnalyticsService : IAdminAnalyticsService
         };
     }
 
-    private async Task SyncGooglePlayReviewsAsync(CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<AdminReviewResponse>> GetReviewsAsync(
+        CancellationToken cancellationToken = default)
+    {
+        var snapshot = await _db.Collection("app_reviews")
+            .GetSnapshotAsync(cancellationToken);
+
+        return snapshot.Documents
+            .Where(document => document.Exists)
+            .Select(document =>
+            {
+                var data = document.ToDictionary();
+                return new AdminReviewResponse
+                {
+                    Id = document.Id,
+                    ReviewId = GetString(data, "reviewId", document.Id),
+                    Author = GetString(data, "author", GetString(data, "authorName", "Google Play user")),
+                    Rating = GetInt(data, "rating"),
+                    Comment = GetString(data, "comment"),
+                    AppVersion = GetString(data, "appVersion"),
+                    Source = GetString(data, "source", "Google Play"),
+                    CreatedAt = GetDateTime(data, "createdAt") ?? GetDateTime(data, "created_at"),
+                    UpdatedAt = GetDateTime(data, "updatedAt"),
+                    Replied = GetBool(data, "replied")
+                };
+            })
+            .OrderByDescending(review => review.CreatedAt ?? DateTime.MinValue)
+            .ToList();
+    }
+
+    public async Task<int> SyncGooglePlayReviewsAsync(
+        CancellationToken cancellationToken = default)
     {
         var packageName = _configuration["Google:PackageName"]?.Trim();
         if (string.IsNullOrWhiteSpace(packageName))
-            return;
+            return 0;
 
         var serviceAccountValue = _configuration["Google:ServiceAccountJson"]?.Trim();
         if (string.IsNullOrWhiteSpace(serviceAccountValue))
@@ -132,7 +162,7 @@ public class AdminAnalyticsService : IAdminAnalyticsService
                 _logger.LogWarning(
                     "Google Play review sync failed with HTTP {StatusCode}.",
                     response.StatusCode);
-                return;
+                return 0;
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
@@ -142,7 +172,7 @@ public class AdminAnalyticsService : IAdminAnalyticsService
             if (!payload.RootElement.TryGetProperty("reviews", out var reviews)
                 || reviews.ValueKind != JsonValueKind.Array)
             {
-                return;
+                return 0;
             }
 
             var batch = _db.StartBatch();
@@ -178,6 +208,8 @@ public class AdminAnalyticsService : IAdminAnalyticsService
                 await batch.CommitAsync(cancellationToken);
                 _logger.LogInformation("Synced {ReviewCount} Google Play reviews.", synced);
             }
+
+            return synced;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -187,6 +219,8 @@ public class AdminAnalyticsService : IAdminAnalyticsService
         {
             _logger.LogWarning(ex, "Google Play review sync failed; using cached Firestore reviews.");
         }
+
+        return 0;
     }
 
     private async Task<string> GetGoogleAccessTokenAsync(

@@ -81,6 +81,7 @@ builder.Services.AddSingleton(_ => new FirestoreDbBuilder
 }.Build());// FirestoreService: Scoped (one instance per HTTP request)
 builder.Services.AddScoped<IFirestoreService, FirestoreService>();
 builder.Services.AddHttpClient<IAdminAnalyticsService, AdminAnalyticsService>();
+builder.Services.AddHostedService<GooglePlayReviewSyncWorker>();
 
 // GeminiService disabled: requests now use OpenAiService.
 // builder.Services.AddHttpClient<IGeminiService, GeminiService>(...);

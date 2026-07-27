@@ -71,6 +71,45 @@ public class AdminAnalyticsController : ControllerBase
         }
     }
 
+    [HttpGet("reviews")]
+    public async Task<IActionResult> GetReviews(
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (!IsAdminRequest())
+            {
+                return StatusCode(StatusCodes.Status403Forbidden, new ApiResponse<object>
+                {
+                    Status = "error",
+                    Message = "Admin permission is required."
+                });
+            }
+
+            var reviews = await _adminAnalyticsService.GetReviewsAsync(cancellationToken);
+
+            return Ok(new ApiResponse<IReadOnlyList<AdminReviewResponse>>
+            {
+                Status = "success",
+                Message = "Google Play reviews retrieved successfully.",
+                Data = reviews
+            });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(499);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error getting Google Play reviews.");
+            return StatusCode(StatusCodes.Status500InternalServerError, new ApiResponse<object>
+            {
+                Status = "error",
+                Message = "An unexpected error occurred. Please try again."
+            });
+        }
+    }
+
     private bool IsAdminRequest()
     {
         var adminClaim = User.FindFirst("admin")?.Value;

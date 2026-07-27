@@ -72,3 +72,26 @@ public class AdminAnalyticsTransactionResponse
 
     public DateTime? PaidAt { get; set; }
 }
+
+public class AdminReviewResponse
+{
+    public string Id { get; set; } = string.Empty;
+
+    public string ReviewId { get; set; } = string.Empty;
+
+    public string Author { get; set; } = string.Empty;
+
+    public int Rating { get; set; }
+
+    public string Comment { get; set; } = string.Empty;
+
+    public string AppVersion { get; set; } = string.Empty;
+
+    public string Source { get; set; } = string.Empty;
+
+    public DateTime? CreatedAt { get; set; }
+
+    public DateTime? UpdatedAt { get; set; }
+
+    public bool Replied { get; set; }
+}
