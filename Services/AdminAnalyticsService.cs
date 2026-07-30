@@ -44,8 +44,6 @@ public class AdminAnalyticsService : IAdminAnalyticsService
         DateTime? to,
         CancellationToken cancellationToken = default)
     {
-        await SyncGooglePlayReviewsAsync(cancellationToken);
-
         var normalizedGranularity = NormalizeGranularity(granularity);
         var fromUtc = NormalizeStart(from);
         var toUtc = NormalizeEnd(to);
@@ -169,45 +167,46 @@ public class AdminAnalyticsService : IAdminAnalyticsService
             using var payload = await JsonDocument.ParseAsync(
                 stream,
                 cancellationToken: cancellationToken);
-            if (!payload.RootElement.TryGetProperty("reviews", out var reviews)
-                || reviews.ValueKind != JsonValueKind.Array)
-            {
-                return 0;
-            }
 
-            var batch = _db.StartBatch();
+            var recentReviewIds = new HashSet<string>(StringComparer.Ordinal);
+            var reviews = payload.RootElement.TryGetProperty("reviews", out var reviewElements)
+                && reviewElements.ValueKind == JsonValueKind.Array
+                ? reviewElements
+                : default;
             var synced = 0;
-            foreach (var reviewElement in reviews.EnumerateArray())
+            if (reviews.ValueKind == JsonValueKind.Array)
             {
-                var review = ParseGooglePlayReview(reviewElement);
-                if (review is null)
-                    continue;
-
-                var document = _db.Collection("app_reviews")
-                    .Document(Uri.EscapeDataString(review.Id));
-                batch.Set(document, new Dictionary<string, object>
+                var batch = _db.StartBatch();
+                var verifiedAt = Timestamp.FromDateTime(DateTime.UtcNow);
+                foreach (var reviewElement in reviews.EnumerateArray())
                 {
-                    ["uid"] = string.Empty,
-                    ["reviewId"] = review.Id,
-                    ["author"] = review.Author,
-                    ["authorName"] = review.Author,
-                    ["rating"] = review.Rating,
-                    ["comment"] = review.Text,
-                    ["createdAt"] = Timestamp.FromDateTime(review.LastModified),
-                    ["updatedAt"] = Timestamp.FromDateTime(review.LastModified),
-                    ["appVersion"] = review.AppVersion,
-                    ["source"] = "Google Play",
-                    ["platform"] = "android",
-                    ["replied"] = review.Replied
-                }, SetOptions.MergeAll);
-                synced++;
+                    var review = ParseGooglePlayReview(reviewElement);
+                    if (review is null)
+                        continue;
+
+                    var document = _db.Collection("app_reviews")
+                        .Document(Uri.EscapeDataString(review.Id));
+                    batch.Set(
+                        document,
+                        CreateReviewDocument(review, verifiedAt, seenInList: true),
+                        SetOptions.MergeAll);
+                    recentReviewIds.Add(review.Id);
+                    synced++;
+                }
+
+                if (synced > 0)
+                    await batch.CommitAsync(cancellationToken);
             }
 
-            if (synced > 0)
-            {
-                await batch.CommitAsync(cancellationToken);
-                _logger.LogInformation("Synced {ReviewCount} Google Play reviews.", synced);
-            }
+            var deleted = await ReconcileCachedReviewsAsync(
+                packageName,
+                accessToken,
+                recentReviewIds,
+                cancellationToken);
+            _logger.LogInformation(
+                "Google Play review sync completed. Upserted {SyncedCount}; deleted {DeletedCount} stale reviews.",
+                synced,
+                deleted);
 
             return synced;
         }
@@ -221,6 +220,139 @@ public class AdminAnalyticsService : IAdminAnalyticsService
         }
 
         return 0;
+    }
+
+    private async Task<int> ReconcileCachedReviewsAsync(
+        string packageName,
+        string accessToken,
+        HashSet<string> recentlySeenReviewIds,
+        CancellationToken cancellationToken)
+    {
+        var validationBatchSize = Math.Clamp(
+            _configuration.GetValue<int>("Google:ReviewValidationBatchSize", 150),
+            0,
+            190);
+        if (validationBatchSize == 0)
+            return 0;
+
+        var snapshot = await _db.Collection("app_reviews")
+            .GetSnapshotAsync(cancellationToken);
+        var candidates = snapshot.Documents
+            .Where(document => document.Exists)
+            .Select(document =>
+            {
+                var data = document.ToDictionary();
+                var reviewId = GetString(
+                    data,
+                    "reviewId",
+                    Uri.UnescapeDataString(document.Id));
+                return new CachedReviewCandidate(
+                    document.Reference,
+                    reviewId,
+                    GetDateTime(data, "lastVerifiedAt"));
+            })
+            .Where(candidate =>
+                !string.IsNullOrWhiteSpace(candidate.ReviewId)
+                && !recentlySeenReviewIds.Contains(candidate.ReviewId))
+            .OrderBy(candidate => candidate.LastVerifiedAt ?? DateTime.MinValue)
+            .Take(validationBatchSize)
+            .ToList();
+
+        if (candidates.Count == 0)
+            return 0;
+
+        var batch = _db.StartBatch();
+        var mutationCount = 0;
+        var deletedCount = 0;
+        var verifiedCount = 0;
+        foreach (var candidate in candidates)
+        {
+            var url = "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/"
+                + Uri.EscapeDataString(packageName)
+                + "/reviews/"
+                + Uri.EscapeDataString(candidate.ReviewId);
+
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            using var response = await _httpClient.SendAsync(request, cancellationToken);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                batch.Delete(candidate.Reference);
+                mutationCount++;
+                deletedCount++;
+                continue;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Could not verify Google Play review {ReviewId}; HTTP {StatusCode}. Cached review was kept.",
+                    candidate.ReviewId,
+                    response.StatusCode);
+                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                    break;
+                continue;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var payload = await JsonDocument.ParseAsync(
+                stream,
+                cancellationToken: cancellationToken);
+            var review = ParseGooglePlayReview(payload.RootElement);
+            if (review is null)
+            {
+                _logger.LogWarning(
+                    "Google Play returned an invalid payload for review {ReviewId}. Cached review was kept.",
+                    candidate.ReviewId);
+                continue;
+            }
+
+            batch.Set(
+                candidate.Reference,
+                CreateReviewDocument(
+                    review,
+                    Timestamp.FromDateTime(DateTime.UtcNow),
+                    seenInList: false),
+                SetOptions.MergeAll);
+            mutationCount++;
+            verifiedCount++;
+        }
+
+        if (mutationCount > 0)
+            await batch.CommitAsync(cancellationToken);
+
+        _logger.LogInformation(
+            "Verified {VerifiedCount} cached Google Play reviews and removed {DeletedCount} deleted reviews.",
+            verifiedCount,
+            deletedCount);
+        return deletedCount;
+    }
+
+    private static Dictionary<string, object> CreateReviewDocument(
+        GooglePlayReviewRecord review,
+        Timestamp verifiedAt,
+        bool seenInList)
+    {
+        var document = new Dictionary<string, object>
+        {
+            ["uid"] = string.Empty,
+            ["reviewId"] = review.Id,
+            ["author"] = review.Author,
+            ["authorName"] = review.Author,
+            ["rating"] = review.Rating,
+            ["comment"] = review.Text,
+            ["createdAt"] = Timestamp.FromDateTime(review.LastModified),
+            ["updatedAt"] = Timestamp.FromDateTime(review.LastModified),
+            ["appVersion"] = review.AppVersion,
+            ["source"] = "Google Play",
+            ["platform"] = "android",
+            ["replied"] = review.Replied,
+            ["lastVerifiedAt"] = verifiedAt
+        };
+        if (seenInList)
+            document["lastSeenAt"] = verifiedAt;
+        return document;
     }
 
     private async Task<string> GetGoogleAccessTokenAsync(
@@ -536,6 +668,11 @@ public class AdminAnalyticsService : IAdminAnalyticsService
             ? 0
             : Math.Round(values.Average(), 1, MidpointRounding.AwayFromZero);
     }
+
+    private sealed record CachedReviewCandidate(
+        DocumentReference Reference,
+        string ReviewId,
+        DateTime? LastVerifiedAt);
 
     private static string GetString(
         IReadOnlyDictionary<string, object> data,
